@@ -1,4 +1,5 @@
 import os
+import sys
 from picard.config import BoolOption, TextOption, IntOption
 
 PLUGIN_NAME = "AcousticBrainz-ng"
@@ -12,6 +13,7 @@ External dependencies:
 <ul>
 <li><a href='https://essentia.upf.edu'>Essentia</a> binaries compiled with TensorFlow and gaia2 support</li>
 <li>A few MusicNN models (see user guide for details)</li>
+<li><a href='https://ffmpeg.org'>FFmpeg</a></li>
 </ul>
 <strong>This plugin is CPU heavy!</strong>
 """
@@ -53,12 +55,14 @@ ENV['TF_ENABLE_ONEDNN_OPTS'] = "0"
 
 CONFIG_OPTIONS = [
     TextOption("setting", "acousticbrainz_ng_binaries_path", os.path.join(os.path.dirname(__file__), "bin")),
+    TextOption("setting", "acousticbrainz_ng_ffmpeg_path", os.path.join(os.path.dirname(sys.executable), "ffmpeg" + (".exe" if os.name == "nt" else ""))),
     TextOption("setting", "acousticbrainz_ng_models_path", os.path.join(os.path.dirname(__file__), "models")),
     TextOption("setting", "acousticbrainz_ng_cache_path", os.path.join(os.path.dirname(__file__), "cache")),
     IntOption("setting", "acousticbrainz_ng_max_musicnn_workers", 4),
-    BoolOption("setting", "acousticbrainz_ng_autorun", False),
+    IntOption("setting", "acousticbrainz_ng_replaygain_reference_loudness", -18),
     BoolOption("setting", "acousticbrainz_ng_analyze_optional", False),
-    BoolOption("setting", "acousticbrainz_ng_save_raw", False)
+    BoolOption("setting", "acousticbrainz_ng_save_raw", False),
+    BoolOption("setting", "acousticbrainz_ng_calculate_replaygain", True)
 ]
 
 GAIA_KEY_ALGORITHMS = ["edma", "krumhansl", "temperley"]

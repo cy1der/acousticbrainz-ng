@@ -4,6 +4,7 @@ import subprocess
 import hashlib
 import threading
 import concurrent.futures
+import tempfile
 
 from picard import config, log
 from picard.ui.itemviews import (
@@ -14,6 +15,7 @@ from picard.ui.itemviews import (
 from picard.track import Track
 from picard.album import Album
 from picard.ui.options import OptionsPage, register_options_page
+from picard.formats import OggOpusFile
 from PyQt5 import QtWidgets
 
 from .constants import *
@@ -385,20 +387,336 @@ class AcousticBrainzNG:
     def _check_optional_models(self) -> bool:
         return self._check_models(OPTIONAL_MODELS)
 
+    def _is_opus_file(self, file_path: str) -> bool:
+        return file_path.lower().endswith('.opus')
+    
+    def calculate_track_loudness(self, file_path: str) -> dict:
+        try:
+            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
+            if not ffmpeg_path:
+                raise ValueError("FFmpeg path not configured")
+            
+            replaygain_lufs_result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-i", file_path, "-af", f"loudnorm=I={config.setting['acousticbrainz_ng_replaygain_reference_loudness']}:print_format=json", "-f", "null", "-"],
+                capture_output=True,
+                text=True,
+                env=ENV
+            )
+            
+            replaygain_gain = None
+            replaygain_peak = None
+            replaygain_range = None
+            
+            try:
+                json_start = replaygain_lufs_result.stderr.find('{')
+                if json_start != -1:
+                    json_str = replaygain_lufs_result.stderr[json_start:]
+                    json_end = json_str.find('}') + 1
+                    if json_end > 0:
+                        loudnorm_data = json.loads(json_str[:json_end])
+                        input_i = loudnorm_data.get('input_i')
+                        input_tp = loudnorm_data.get('input_tp')
+                        input_lra = loudnorm_data.get('input_lra')
+                        
+                        if input_i and input_i != "-inf":
+                            replaygain_gain = f"{(config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18) - float(input_i):.2f}"
+
+                        if input_tp and input_tp != "-inf":
+                            replaygain_peak = f"{10 ** (float(input_tp) / 20):.6f}"
+                        
+                        if input_lra and input_lra != "-inf":
+                            replaygain_range = f"{float(input_lra):.2f}"
+                            
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+            
+            result: dict = {
+                "replaygain_track_gain": replaygain_gain,
+                "replaygain_track_peak": replaygain_peak,
+                "replaygain_track_range": replaygain_range,
+                "replaygain_reference_loudness": f"{(config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18):.2f}"
+            }
+            
+            r128_result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-i", file_path, "-af", "loudnorm=I=-23:print_format=json", "-f", "null", "-"],
+                capture_output=True,
+                text=True,
+                env=ENV
+            )
+            
+            r128_track_gain = None
+            
+            try:
+                json_start = r128_result.stderr.find('{')
+                if json_start != -1:
+                    json_str = r128_result.stderr[json_start:]
+                    json_end = json_str.find('}') + 1
+                    if json_end > 0:
+                        r128_data = json.loads(json_str[:json_end])
+                        r128_input_i = r128_data.get('input_i')
+                        
+                        if r128_input_i and r128_input_i != "-inf":
+                            r128_gain_db = -23 - float(r128_input_i)
+                            r128_track_gain = int(round(r128_gain_db * 256))
+                            
+                            if r128_track_gain < -32768:
+                                r128_track_gain = -32768
+                            elif r128_track_gain > 32767:
+                                r128_track_gain = 32767
+                                
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+            
+            result["r128_track_gain"] = r128_track_gain
+            
+            return result
+            
+        except Exception as e:
+            log.error(f"Error calculating track loudness: {e}")
+            return {}
+
+    def calculate_album_loudness(self, album_track_files: list[str]) -> dict:
+        try:
+            if len(album_track_files) == 0:
+                return {}
+            elif len(album_track_files) == 1:
+                return {}
+            
+            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
+            if not ffmpeg_path:
+                raise ValueError("FFmpeg path not configured")
+            
+            album_track_files.sort()
+            
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as concat_file:
+                for audio_file in album_track_files:
+                    concat_file.write(f"file '{audio_file}'\n")
+                concat_file_path = concat_file.name
+            
+            try:
+                album_replaygain_result = subprocess.run(
+                    [ffmpeg_path, "-hide_banner", "-f", "concat", "-safe", "0", "-i", concat_file_path, 
+                     "-vn", "-af", f"loudnorm=I={config.setting['acousticbrainz_ng_replaygain_reference_loudness']}:print_format=json", "-f", "null", "-"],
+                    capture_output=True,
+                    text=True,
+                    env=ENV
+                )
+                
+                album_gain = None
+                album_peak = None
+                album_range = None
+                
+                try:
+                    json_start = album_replaygain_result.stderr.find('{')
+                    if json_start != -1:
+                        json_str = album_replaygain_result.stderr[json_start:]
+                        json_end = json_str.find('}') + 1
+                        if json_end > 0:
+                            loudnorm_data = json.loads(json_str[:json_end])
+                            input_i = loudnorm_data.get('input_i')
+                            input_tp = loudnorm_data.get('input_tp')
+                            input_lra = loudnorm_data.get('input_lra')
+                            
+                            if input_i and input_i != "-inf":
+                                album_gain = f"{(config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18) - float(input_i):.2f}"
+
+                            if input_tp and input_tp != "-inf":
+                                album_peak = f"{10 ** (float(input_tp) / 20):.6f}"
+                            
+                            if input_lra and input_lra != "-inf":
+                                album_range = f"{float(input_lra):.2f}"
+                                
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+                
+                result: dict = {
+                    "replaygain_album_gain": album_gain,
+                    "replaygain_album_peak": album_peak,
+                    "replaygain_album_range": album_range
+                }
+                
+                album_r128_result = subprocess.run(
+                    [ffmpeg_path, "-hide_banner", "-f", "concat", "-safe", "0", "-i", concat_file_path,
+                     "-vn", "-af", "loudnorm=I=-23:print_format=json", "-f", "null", "-"],
+                    capture_output=True,
+                    text=True,
+                    env=ENV
+                )
+                
+                r128_album_gain = None
+                
+                try:
+                    json_start = album_r128_result.stderr.find('{')
+                    if json_start != -1:
+                        json_str = album_r128_result.stderr[json_start:]
+                        json_end = json_str.find('}') + 1
+                        if json_end > 0:
+                            r128_data = json.loads(json_str[:json_end])
+                            r128_input_i = r128_data.get('input_i')
+                            
+                            if r128_input_i and r128_input_i != "-inf":
+                                r128_gain_db = -23 - float(r128_input_i)
+                                r128_album_gain = int(round(r128_gain_db * 256))
+                                
+                                if r128_album_gain < -32768:
+                                    r128_album_gain = -32768
+                                elif r128_album_gain > 32767:
+                                    r128_album_gain = 32767
+                                    
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+                result["r128_album_gain"] = r128_album_gain
+                
+                return result
+            
+            finally:
+                os.unlink(concat_file_path)
+                
+        except Exception as e:
+            log.error(f"Error calculating album loudness: {e}")
+            return {}
+
+    def calculate_loudness(self, metadata: dict, file_path: str, album: Album | None = None) -> None:
+        try:
+            cache_folder = self._generate_cache_folder(metadata, file_path)
+            loudness_file = os.path.join(cache_folder, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
+
+            if os.path.exists(loudness_file):
+                return
+
+            track_loudness = self.calculate_track_loudness(file_path)
+
+            album_loudness = {}
+            if album is not None:
+                release_mbid_folder = os.path.dirname(cache_folder)
+                album_data_file = os.path.join(release_mbid_folder, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
+
+                if not os.path.exists(album_data_file):
+                    album_track_files = []
+                    
+                    for track in album.tracks:
+                        for file in track.files:
+                            album_track_files.append(file.filename)
+                    
+                    if len(album_track_files) == 1:
+                        album_loudness = {
+                            "replaygain_album_gain": track_loudness.get("replaygain_track_gain"),
+                            "replaygain_album_peak": track_loudness.get("replaygain_track_peak"),
+                            "replaygain_album_range": track_loudness.get("replaygain_track_range")
+                        }
+                        if track_loudness.get("r128_track_gain") is not None:
+                            album_loudness["r128_album_gain"] = track_loudness.get("r128_track_gain")
+                    else:
+                        album_loudness = self.calculate_album_loudness(album_track_files)
+
+                    album_data = {
+                        "track_count": len(album_track_files),
+                        **album_loudness
+                    }
+
+                    with open(album_data_file, 'w', encoding='utf-8') as f:
+                        json.dump(album_data, f, indent=2)
+                else:
+                    try:
+                        with open(album_data_file, 'r', encoding='utf-8') as f:
+                            album_data = json.load(f)
+                            album_loudness = {
+                                "replaygain_album_gain": album_data.get('replaygain_album_gain'),
+                                "replaygain_album_peak": album_data.get('replaygain_album_peak'),
+                                "replaygain_album_range": album_data.get('replaygain_album_range')
+                            }
+                            
+                            if album_data.get('r128_album_gain') is not None:
+                                album_loudness["r128_album_gain"] = album_data.get('r128_album_gain')
+                    except (FileNotFoundError, json.JSONDecodeError) as e:
+                        log.error(f"Error reading album data file: {e}")
+
+            loudness_data = {
+                **track_loudness,
+                **album_loudness
+            }
+            
+            with open(loudness_file, 'w', encoding='utf-8') as f:
+                json.dump(loudness_data, f, indent=2)
+        except Exception as e:
+            log.error(f"Error calculating loudness: {e}")
+    
+    def parse_loudness(self, metadata: dict, file: str) -> None:
+        output_path = self._generate_cache_folder(metadata, file)
+        if not output_path:
+            raise ValueError("Failed to generate cache folder path")
+
+        loudness_file = os.path.join(output_path, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
+        if not os.path.exists(loudness_file):
+            log.error(f"Loudness file not found: {loudness_file}")
+            return
+        
+        loudness_data = {}
+        
+        try:
+            with open(loudness_file, 'r', encoding='utf-8') as f:
+                loudness_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            log.error(f"Error reading loudness file: {e}")
+            return
+
+        is_opus = self._is_opus_file(file)
+
+        replaygain_track_gain = loudness_data.get("replaygain_track_gain")
+        if replaygain_track_gain is not None:
+            metadata["replaygain_track_gain"] = f"{replaygain_track_gain} dB"
+        
+        replaygain_track_peak = loudness_data.get("replaygain_track_peak")
+        if replaygain_track_peak is not None:
+            metadata["replaygain_track_peak"] = replaygain_track_peak
+        
+        replaygain_track_range = loudness_data.get("replaygain_track_range")
+        if replaygain_track_range is not None:
+            metadata["replaygain_track_range"] = f"{replaygain_track_range} dB"
+        
+        replaygain_album_gain = loudness_data.get("replaygain_album_gain")
+        if replaygain_album_gain is not None:
+            metadata["replaygain_album_gain"] = f"{replaygain_album_gain} dB"
+        
+        replaygain_album_peak = loudness_data.get("replaygain_album_peak")
+        if replaygain_album_peak is not None:
+            metadata["replaygain_album_peak"] = replaygain_album_peak
+        
+        replaygain_album_range = loudness_data.get("replaygain_album_range")
+        if replaygain_album_range is not None:
+            metadata["replaygain_album_range"] = f"{replaygain_album_range} dB"
+        
+        replaygain_reference_loudness = loudness_data.get("replaygain_reference_loudness")
+        if replaygain_reference_loudness is not None:
+            metadata["replaygain_reference_loudness"] = f"{replaygain_reference_loudness} LUFS"
+        
+        if is_opus:
+            r128_track_gain = loudness_data.get("r128_track_gain")
+            if r128_track_gain is not None:
+                metadata["r128_track_gain"] = r128_track_gain
+            
+            r128_album_gain = loudness_data.get("r128_album_gain")
+            if r128_album_gain is not None:
+                metadata["r128_album_gain"] = r128_album_gain
+
 acousticbrainz_ng = AcousticBrainzNG()
 
 class AcousticBrainzNGAction(BaseAction):
     NAME = f"Analyze with {PLUGIN_NAME}"
     
-    def _process_track(self, track: Track) -> None:
+    def _process_track(self, track: Track, album: Album | None = None) -> None:
         for file in track.files:
             acousticbrainz_ng.analyze_required(file.metadata, file.filename)
             acousticbrainz_ng.parse_required(file.metadata, file.filename)
-            # TODO: Implement track replaygain
             
             if config.setting["acousticbrainz_ng_analyze_optional"]:
                 acousticbrainz_ng.analyze_optional(file.metadata, file.filename)
                 acousticbrainz_ng.parse_optional(file.metadata, file.filename)
+            
+            if config.setting["acousticbrainz_ng_calculate_replaygain"]:
+                acousticbrainz_ng.calculate_loudness(file.metadata, file.filename, album)
+                acousticbrainz_ng.parse_loudness(file.metadata, file.filename)
     
     def callback(self, objs):
         for item in (t for t in objs if isinstance(t, Track) or isinstance(t, Album)):
@@ -406,9 +724,7 @@ class AcousticBrainzNGAction(BaseAction):
                 self._process_track(item)
             elif isinstance(item, Album):
                 for track in item.tracks:
-                    self._process_track(track)
-
-                # TODO: Implement album replaygain
+                    self._process_track(track, item)
 
 class AcousticBrainzNGOptionsPage(OptionsPage):
     NAME = "acousticbrainz_ng"
@@ -442,9 +758,6 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         options_group = QtWidgets.QGroupBox("Options", self)
         options_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Minimum)
         options_layout = QtWidgets.QVBoxLayout(options_group)
-        
-        self.autorun_checkbox = QtWidgets.QCheckBox("Autorun analysis", self)
-        self.autorun_checkbox.setToolTip("Automatically run analysis on new tracks")
 
         self.analyze_optional_checkbox = QtWidgets.QCheckBox("Analyze optional MusicNN models", self)
         self.analyze_optional_checkbox.setToolTip("Include optional MusicNN models in the analysis, currently unused unless raw values is enabled")
@@ -452,10 +765,14 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.save_raw_checkbox = QtWidgets.QCheckBox("Save raw values", self)
         self.save_raw_checkbox.setToolTip("Save raw MusicNN numbers in the metadata")
         
+        self.calculate_replaygain_checkbox = QtWidgets.QCheckBox("Calculate ReplayGain", self)
+        self.calculate_replaygain_checkbox.setToolTip("Calculate ReplayGain values for the track and album")
+        
         musicnn_workers_layout = QtWidgets.QHBoxLayout()
+        rg_reference_layout = QtWidgets.QHBoxLayout()
         
         musicnn_workers_label = QtWidgets.QLabel("Max MusicNN workers:", self)
-        musicnn_workers_label.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
+        musicnn_workers_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.musicnn_workers_input = QtWidgets.QSpinBox(self)
         self.musicnn_workers_input.setToolTip("Maximum number of concurrent MusicNN workers")
         self.musicnn_workers_input.setRange(1, max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS)))
@@ -465,10 +782,24 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         musicnn_workers_layout.addStretch()
         musicnn_workers_layout.addWidget(self.musicnn_workers_input)
         
-        options_layout.addWidget(self.autorun_checkbox)
+        rg_reference_label = QtWidgets.QLabel("ReplayGain reference loudness (LUFS):", self)
+        rg_reference_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.rg_reference_input = QtWidgets.QSpinBox(self)
+        self.rg_reference_input.setToolTip("ReplayGain reference loudness in LUFS")
+        self.rg_reference_input.setRange(-30, -5)
+        self.rg_reference_input.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
+        
+        self.calculate_replaygain_checkbox.toggled.connect(self.rg_reference_input.setEnabled)
+
+        rg_reference_layout.addWidget(rg_reference_label)
+        rg_reference_layout.addStretch()
+        rg_reference_layout.addWidget(self.rg_reference_input)
+
         options_layout.addWidget(self.analyze_optional_checkbox)
         options_layout.addWidget(self.save_raw_checkbox)
+        options_layout.addWidget(self.calculate_replaygain_checkbox)
         options_layout.addLayout(musicnn_workers_layout)
+        options_layout.addLayout(rg_reference_layout)
 
         layout.addWidget(options_group)
 
@@ -482,6 +813,15 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         binaries_layout = self._create_path_input_layout(
             self.binaries_path_input,
             lambda: self._browse_folder(self.binaries_path_input),
+            lambda: (self._check_binaries(show_success=True), None)[1]
+        )
+        
+        # FFmpeg path
+        self.ffmpeg_path_input = QtWidgets.QLineEdit(self)
+        self.ffmpeg_path_input.setPlaceholderText("Path to FFmpeg")
+        ffmpeg_layout = self._create_path_input_layout(
+            self.ffmpeg_path_input,
+            lambda: self._browse_file(self.ffmpeg_path_input),
             lambda: (self._check_binaries(show_success=True), None)[1]
         )
 
@@ -502,6 +842,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             lambda: self._browse_folder(self.cache_path_input)
         )
 
+        paths_layout.addWidget(QtWidgets.QLabel("FFmpeg", self))
+        paths_layout.addLayout(ffmpeg_layout)
         paths_layout.addWidget(QtWidgets.QLabel("Binaries", self))
         paths_layout.addLayout(binaries_layout)
         paths_layout.addWidget(QtWidgets.QLabel("Models", self))
@@ -514,18 +856,30 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         layout.addStretch()
 
     def _check_binaries(self, show_success=False) -> bool:
-        path = self.binaries_path_input.text()
-        if not path or not os.path.exists(path):
-            QtWidgets.QMessageBox.warning(self, "Binaries", "Invalid or empty path.")
+        binaries_path = self.binaries_path_input.text()
+        if not binaries_path or not os.path.exists(binaries_path):
+            QtWidgets.QMessageBox.warning(self, "Binaries", "Invalid or empty binaries path.")
+            return False
+        
+        ffmpeg_path = self.ffmpeg_path_input.text()
+        if not ffmpeg_path or not os.path.exists(ffmpeg_path):
+            QtWidgets.QMessageBox.warning(self, "Binaries", "Invalid or empty FFmpeg path.")
             return False
         
         missing_binaries = []
         for binary in REQUIRED_BINARIES:
-            binary_path = os.path.join(path, binary)
+            binary_path = os.path.join(binaries_path, binary)
             if os.name == 'nt':  # Windows
                 binary_path += '.exe'
             if not os.path.exists(binary_path):
                 missing_binaries.append(binary)
+        
+        try:
+            result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True)
+            if result.returncode != 0 or "ffmpeg version" not in result.stdout:
+                missing_binaries.append("FFmpeg (invalid executable)")
+        except Exception:
+            missing_binaries.append("FFmpeg (unable to execute)")
         
         if missing_binaries:
             message = f"Missing binaries:\n" + "\n".join(f"• {binary}" for binary in missing_binaries)
@@ -580,15 +934,33 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             )
             if folder:
                 line_edit.setText(folder)
+    
+    def _browse_file(self, line_edit: QtWidgets.QLineEdit) -> None:
+        file, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select File",
+            line_edit.text() or os.path.expanduser("~"),
+            "All Files (*)"
+        )
+        if file:
+            line_edit.setText(file)
 
     def load(self):
-        self.autorun_checkbox.setChecked(config.setting["acousticbrainz_ng_autorun"] or False)
         self.analyze_optional_checkbox.setChecked(config.setting["acousticbrainz_ng_analyze_optional"] or False)
         self.save_raw_checkbox.setChecked(config.setting["acousticbrainz_ng_save_raw"] or False)
         
+        replaygain_setting = config.setting["acousticbrainz_ng_calculate_replaygain"]
+        if replaygain_setting is None:
+            self.calculate_replaygain_checkbox.setChecked(True)
+        else:
+            self.calculate_replaygain_checkbox.setChecked(replaygain_setting)
+        
+        self.rg_reference_input.setEnabled(self.calculate_replaygain_checkbox.isChecked())
+        
         self.musicnn_workers_input.setValue(config.setting["acousticbrainz_ng_max_musicnn_workers"] or 4)
+        self.rg_reference_input.setValue(config.setting["acousticbrainz_ng_replaygain_reference_loudness"] or -18)
 
         self.binaries_path_input.setText(config.setting["acousticbrainz_ng_binaries_path"])
+        self.ffmpeg_path_input.setText(config.setting["acousticbrainz_ng_ffmpeg_path"])
         self.models_path_input.setText(config.setting["acousticbrainz_ng_models_path"])
         self.cache_path_input.setText(config.setting["acousticbrainz_ng_cache_path"])
     
@@ -596,14 +968,18 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self._check_binaries()
         self._check_models(show_success=False, check_optional=False)
         
-        config.setting["acousticbrainz_ng_autorun"] = self.autorun_checkbox.isChecked()
         config.setting["acousticbrainz_ng_analyze_optional"] = self.analyze_optional_checkbox.isChecked()
         config.setting["acousticbrainz_ng_save_raw"] = self.save_raw_checkbox.isChecked()
+        config.setting["acousticbrainz_ng_calculate_replaygain"] = self.calculate_replaygain_checkbox.isChecked()
 
         max_workers = max(1, min(self.musicnn_workers_input.value(), max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))))
         config.setting["acousticbrainz_ng_max_musicnn_workers"] = max_workers
+        
+        rg_reference = max(-30, min(self.rg_reference_input.value(), -5))
+        config.setting["acousticbrainz_ng_replaygain_reference_loudness"] = rg_reference
 
         config.setting["acousticbrainz_ng_binaries_path"] = self.binaries_path_input.text()
+        config.setting["acousticbrainz_ng_ffmpeg_path"] = self.ffmpeg_path_input.text()
         config.setting["acousticbrainz_ng_models_path"] = self.models_path_input.text()
         config.setting["acousticbrainz_ng_cache_path"] = self.cache_path_input.text()
 
