@@ -5,6 +5,7 @@ import hashlib
 import threading
 import concurrent.futures
 import tempfile
+from typing import List, Tuple, Dict, Optional
 
 from picard import config, log
 from picard.ui.itemviews import (
@@ -15,7 +16,6 @@ from picard.ui.itemviews import (
 from picard.track import Track
 from picard.album import Album
 from picard.ui.options import OptionsPage, register_options_page
-from picard.formats import OggOpusFile
 from PyQt5 import QtWidgets
 
 from .constants import *
@@ -31,7 +31,7 @@ class AcousticBrainzNG:
             binary_path += '.exe'
         return binary_path
 
-    def _get_binary_paths(self) -> tuple[str, str]:
+    def _get_binary_paths(self) -> Tuple[str, str]:
         binaries_path = config.setting["acousticbrainz_ng_binaries_path"]
         if not binaries_path:
             raise ValueError("Binaries path not configured")
@@ -46,7 +46,7 @@ class AcousticBrainzNG:
             
         return musicnn_binary_path, gaia_binary_path
 
-    def _run_musicnn_models(self, models: list[tuple[str, str]], musicnn_binary_path: str, file: str, output_path: str) -> None:
+    def _run_musicnn_models(self, models: List[Tuple[str, str]], musicnn_binary_path: str, file: str, output_path: str) -> None:
         models_path = config.setting["acousticbrainz_ng_models_path"]
         if not models_path:
             raise ValueError("Models path not configured")
@@ -68,7 +68,8 @@ class AcousticBrainzNG:
                     [musicnn_binary_path, model_path, file, output_file_path],
                     capture_output=True,
                     text=True,
-                    env=ENV
+                    env=ENV,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                 )
             except FileNotFoundError as e:
                 log.error(f"Model {model_name} not found: {e}")
@@ -80,7 +81,7 @@ class AcousticBrainzNG:
             futures = [executor.submit(run_musicnn_model, model) for model in models]
             concurrent.futures.wait(futures)
 
-    def analyze_required(self, metadata: dict, file: str) -> None:        
+    def analyze_required(self, metadata: Dict, file: str) -> None:        
         if not self._check_binaries():
             log.error("Essentia binaries not found")
             return
@@ -107,7 +108,8 @@ class AcousticBrainzNG:
                 [gaia_binary_path, file, os.path.join(output_path, "gaia.json")],
                 capture_output=True,
                 text=True,
-                env=ENV
+                env=ENV,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
         
         gaia_thread = threading.Thread(target=run_gaia)
@@ -116,7 +118,7 @@ class AcousticBrainzNG:
         self._run_musicnn_models(REQUIRED_MODELS, musicnn_binary_path, file, output_path)
         gaia_thread.join()
 
-    def analyze_optional(self, metadata: dict, file: str) -> None:        
+    def analyze_optional(self, metadata: Dict, file: str) -> None:        
         if not self._check_binaries():
             log.error("Essentia binaries not found")
             return
@@ -137,7 +139,7 @@ class AcousticBrainzNG:
 
         self._run_musicnn_models(OPTIONAL_MODELS, musicnn_binary_path, file, output_path)
     
-    def parse_required(self, metadata: dict, file: str) -> None:
+    def parse_required(self, metadata: Dict, file: str) -> None:
         if not self._check_required_models():
             raise ValueError("Required models not found")
         
@@ -251,7 +253,7 @@ class AcousticBrainzNG:
                 metadata["ab:lo:tonal:key_scale"] = selected_key_data["scale"]
                 metadata["ab:lo:tonal:key_key"] = selected_key_data["key"]
     
-    def parse_optional(self, metadata: dict, file: str) -> None:
+    def parse_optional(self, metadata: Dict, file: str) -> None:
         if not self._check_optional_models():
             raise ValueError("Optional models not found")
         
@@ -303,7 +305,7 @@ class AcousticBrainzNG:
     def _format_class(class_name: str) -> str:
         return class_name.replace("non", "not").replace("_", " ").capitalize()
 
-    def _generate_cache_folder(self, metadata: dict, file_path: str) -> str:
+    def _generate_cache_folder(self, metadata: Dict, file_path: str) -> str:
         cache_base = config.setting["acousticbrainz_ng_cache_path"]
         if not cache_base:
             raise ValueError("Cache path not configured")
@@ -340,7 +342,8 @@ class AcousticBrainzNG:
                 [binary_path, file_path],
                 capture_output=True,
                 text=True,
-                env=ENV
+                env=ENV,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
             if result.returncode == 0:
@@ -368,7 +371,7 @@ class AcousticBrainzNG:
         
         return True
 
-    def _check_models(self, models: list[tuple[str, str]]) -> bool:
+    def _check_models(self, models: List[Tuple[str, str]]) -> bool:
         path = config.setting["acousticbrainz_ng_models_path"]
         
         if not path or not os.path.exists(path):
@@ -390,7 +393,7 @@ class AcousticBrainzNG:
     def _is_opus_file(self, file_path: str) -> bool:
         return file_path.lower().endswith('.opus')
     
-    def calculate_track_loudness(self, file_path: str) -> dict:
+    def calculate_track_loudness(self, file_path: str) -> Dict:
         try:
             ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
             if not ffmpeg_path:
@@ -400,7 +403,8 @@ class AcousticBrainzNG:
                 [ffmpeg_path, "-hide_banner", "-i", file_path, "-af", f"loudnorm=I={config.setting['acousticbrainz_ng_replaygain_reference_loudness']}:print_format=json", "-f", "null", "-"],
                 capture_output=True,
                 text=True,
-                env=ENV
+                env=ENV,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
             replaygain_gain = None
@@ -430,7 +434,7 @@ class AcousticBrainzNG:
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
             
-            result: dict = {
+            result: Dict = {
                 "replaygain_track_gain": replaygain_gain,
                 "replaygain_track_peak": replaygain_peak,
                 "replaygain_track_range": replaygain_range,
@@ -441,7 +445,8 @@ class AcousticBrainzNG:
                 [ffmpeg_path, "-hide_banner", "-i", file_path, "-af", "loudnorm=I=-23:print_format=json", "-f", "null", "-"],
                 capture_output=True,
                 text=True,
-                env=ENV
+                env=ENV,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
             r128_track_gain = None
@@ -475,7 +480,7 @@ class AcousticBrainzNG:
             log.error(f"Error calculating track loudness: {e}")
             return {}
 
-    def calculate_album_loudness(self, album_track_files: list[str]) -> dict:
+    def calculate_album_loudness(self, album_track_files: List[str]) -> Dict:
         try:
             if len(album_track_files) == 0:
                 return {}
@@ -499,7 +504,8 @@ class AcousticBrainzNG:
                      "-vn", "-af", f"loudnorm=I={config.setting['acousticbrainz_ng_replaygain_reference_loudness']}:print_format=json", "-f", "null", "-"],
                     capture_output=True,
                     text=True,
-                    env=ENV
+                    env=ENV,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                 )
                 
                 album_gain = None
@@ -529,7 +535,7 @@ class AcousticBrainzNG:
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
                 
-                result: dict = {
+                result: Dict = {
                     "replaygain_album_gain": album_gain,
                     "replaygain_album_peak": album_peak,
                     "replaygain_album_range": album_range
@@ -540,7 +546,8 @@ class AcousticBrainzNG:
                      "-vn", "-af", "loudnorm=I=-23:print_format=json", "-f", "null", "-"],
                     capture_output=True,
                     text=True,
-                    env=ENV
+                    env=ENV,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                 )
                 
                 r128_album_gain = None
@@ -577,7 +584,7 @@ class AcousticBrainzNG:
             log.error(f"Error calculating album loudness: {e}")
             return {}
 
-    def calculate_loudness(self, metadata: dict, file_path: str, album: Album | None = None) -> None:
+    def calculate_loudness(self, metadata: Dict, file_path: str, album: Optional[Album] = None) -> None:
         try:
             cache_folder = self._generate_cache_folder(metadata, file_path)
             loudness_file = os.path.join(cache_folder, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
@@ -642,7 +649,7 @@ class AcousticBrainzNG:
         except Exception as e:
             log.error(f"Error calculating loudness: {e}")
     
-    def parse_loudness(self, metadata: dict, file: str) -> None:
+    def parse_loudness(self, metadata: Dict, file: str) -> None:
         output_path = self._generate_cache_folder(metadata, file)
         if not output_path:
             raise ValueError("Failed to generate cache folder path")
@@ -705,7 +712,7 @@ acousticbrainz_ng = AcousticBrainzNG()
 class AcousticBrainzNGAction(BaseAction):
     NAME = f"Analyze with {PLUGIN_NAME}"
     
-    def _process_track(self, track: Track, album: Album | None = None) -> None:
+    def _process_track(self, track: Track, album: Optional[Album] = None) -> None:
         for file in track.files:
             acousticbrainz_ng.analyze_required(file.metadata, file.filename)
             acousticbrainz_ng.parse_required(file.metadata, file.filename)
@@ -875,7 +882,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
                 missing_binaries.append(binary)
         
         try:
-            result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True)
+            result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             if result.returncode != 0 or "ffmpeg version" not in result.stdout:
                 missing_binaries.append("FFmpeg (invalid executable)")
         except Exception:

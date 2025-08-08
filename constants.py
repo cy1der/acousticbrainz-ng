@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import List, Tuple
 from picard.config import BoolOption, TextOption, IntOption
 
 PLUGIN_NAME = "AcousticBrainz-ng"
@@ -23,7 +24,7 @@ PLUGIN_LICENSE = "GPL-2.0-or-later"
 PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
 PLUGIN_USER_GUIDE_URL = "https://example.com" # TODO: Update with actual user guide URL
 
-REQUIRED_MODELS: list[tuple[str, str]] = [
+REQUIRED_MODELS: List[Tuple[str, str]] = [
     ("msd-musicnn-1", "msd"),
     ("mood_acoustic-musicnn-mtt-2", "mood_acoustic"),
     ("mood_aggressive-musicnn-mtt-2", "mood_aggressive"),
@@ -38,13 +39,13 @@ REQUIRED_MODELS: list[tuple[str, str]] = [
     ("voice_instrumental-musicnn-msd-2", "voice_instrumental")
 ]
 
-OPTIONAL_MODELS: list[tuple[str, str]] = [
+OPTIONAL_MODELS: List[Tuple[str, str]] = [
     ("genre_electronic-musicnn-msd-2", "genre_electronic"),
     ("genre_rosamerica-musicnn-msd-2", "genre_rosamerica"),
     ("genre_tzanetakis-musicnn-msd-2", "genre_tzanetakis")
 ]
 
-REQUIRED_BINARIES: list[str] = [
+REQUIRED_BINARIES: List[str] = [
     "streaming_extractor_music",
     "streaming_musicnn_predict",
     "streaming_md5",
