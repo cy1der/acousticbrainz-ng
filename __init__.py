@@ -246,9 +246,9 @@ class AcousticBrainzNG:
         
         if selectedAlgorithm:
             selected_key_data = gaia_data["tonal"][f"key_{selectedAlgorithm}"]
-            
-            metadata["key"] = "o" if selected_key_data["scale"] == "off" else f"{selected_key_data["key"]}{"m" if selected_key_data["scale"] == "minor" else ""}"
-            
+
+            metadata["key"] = "o" if selected_key_data["scale"] == "off" else f"{selected_key_data['key']}{'m' if selected_key_data['scale'] == 'minor' else ''}"
+
             if config.setting["acousticbrainz_ng_save_raw"]:
                 metadata["ab:lo:tonal:key_scale"] = selected_key_data["scale"]
                 metadata["ab:lo:tonal:key_key"] = selected_key_data["key"]
