@@ -46,11 +46,13 @@ class AcousticBrainzNG:
             
         return musicnn_binary_path, gaia_binary_path
 
-    def _run_musicnn_models(self, models: List[Tuple[str, str]], musicnn_binary_path: str, file: str, output_path: str) -> None:
+    def _run_musicnn_models(self, models: List[Tuple[str, str]], musicnn_binary_path: str, file: str, output_path: str) -> bool:
         models_path = config.setting["acousticbrainz_ng_models_path"]
         if not models_path:
-            raise ValueError("Models path not configured")
+            log.error("Models path not configured")
+            return False
 
+        success_results = {}
         def run_musicnn_model(model_info):
             model_name, output_file = model_info
             try:
@@ -62,94 +64,138 @@ class AcousticBrainzNG:
                 output_file_path = os.path.join(output_path, f"{output_file}.json")
                 
                 if os.path.exists(output_file_path):
+                    success_results[model_name] = True
                     return
                 
-                subprocess.run(
+                result = subprocess.run(
                     [musicnn_binary_path, model_path, file, output_file_path],
                     capture_output=True,
                     text=True,
                     env=ENV,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                 )
+                
+                if result.returncode != 0:
+                    success_results[model_name] = False
+                    log.error(f"MusicNN binary {musicnn_binary_path} failed for model {model_name} on file {file} with exit code {result.returncode}")
+                    if result.stdout:
+                        log.error(f"MusicNN stdout: {result.stdout}")
+                    if result.stderr:
+                        log.error(f"MusicNN stderr: {result.stderr}")
+                else:
+                    success_results[model_name] = True
             except FileNotFoundError as e:
+                success_results[model_name] = False
                 log.error(f"Model {model_name} not found: {e}")
             except Exception as e:
+                success_results[model_name] = False
                 log.error(f"Error processing model {model_name}: {e}")
 
         max_workers = config.setting["acousticbrainz_ng_max_musicnn_workers"] or 4
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(run_musicnn_model, model) for model in models]
             concurrent.futures.wait(futures)
+        
+        return all(success_results.get(model[0], False) for model in models)
 
-    def analyze_required(self, metadata: Dict, file: str) -> None:        
+    def analyze_required(self, metadata: Dict, file: str) -> bool:        
         if not self._check_binaries():
             log.error("Essentia binaries not found")
-            return
+            return False
 
         if not self._check_required_models():
             log.error("Required models not found")
-            return
+            return False
         
         try:
             musicnn_binary_path, gaia_binary_path = self._get_binary_paths()
         except (ValueError, FileNotFoundError) as e:
             log.error(str(e))
-            return
+            return False
     
-        output_path = self._generate_cache_folder(metadata, file)
-        if not output_path:
-            raise ValueError("Failed to generate cache folder path")
+        try:
+            output_path = self._generate_cache_folder(metadata, file)
+            if not output_path:
+                log.error("Failed to generate cache folder path")
+                return False
+        except Exception as e:
+            log.error(f"Error generating cache folder: {e}")
+            return False
 
+        gaia_success = True
         def run_gaia():
+            nonlocal gaia_success
             if os.path.exists(os.path.join(output_path, "gaia.json")):
                 return
 
-            subprocess.run(
+            result = subprocess.run(
                 [gaia_binary_path, file, os.path.join(output_path, "gaia.json")],
                 capture_output=True,
                 text=True,
                 env=ENV,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
+            
+            if result.returncode != 0:
+                gaia_success = False
+                log.error(f"Gaia binary {gaia_binary_path} failed on file {file} with exit code {result.returncode}")
+                if result.stdout:
+                    log.error(f"Gaia stdout: {result.stdout}")
+                if result.stderr:
+                    log.error(f"Gaia stderr: {result.stderr}")
         
         gaia_thread = threading.Thread(target=run_gaia)
         gaia_thread.start()
 
-        self._run_musicnn_models(REQUIRED_MODELS, musicnn_binary_path, file, output_path)
+        musicnn_success = self._run_musicnn_models(REQUIRED_MODELS, musicnn_binary_path, file, output_path)
         gaia_thread.join()
+        
+        return gaia_success and musicnn_success
 
-    def analyze_optional(self, metadata: Dict, file: str) -> None:        
+    def analyze_optional(self, metadata: Dict, file: str) -> bool:        
         if not self._check_binaries():
             log.error("Essentia binaries not found")
-            return
+            return False
 
         if not self._check_optional_models():
             log.error("Optional models not found")
-            return
+            return False
         
         try:
             musicnn_binary_path, _ = self._get_binary_paths()
         except (ValueError, FileNotFoundError) as e:
             log.error(str(e))
-            return
+            return False
     
-        output_path = self._generate_cache_folder(metadata, file)
-        if not output_path:
-            raise ValueError("Failed to generate cache folder path")
+        try:
+            output_path = self._generate_cache_folder(metadata, file)
+            if not output_path:
+                log.error("Failed to generate cache folder path")
+                return False
+        except Exception as e:
+            log.error(f"Error generating cache folder: {e}")
+            return False
 
-        self._run_musicnn_models(OPTIONAL_MODELS, musicnn_binary_path, file, output_path)
+        return self._run_musicnn_models(OPTIONAL_MODELS, musicnn_binary_path, file, output_path)
     
-    def parse_required(self, metadata: Dict, file: str) -> None:
+    def parse_required(self, metadata: Dict, file: str) -> bool:
         if not self._check_required_models():
-            raise ValueError("Required models not found")
+            log.error("Required models not found")
+            return False
         
         models_path = config.setting["acousticbrainz_ng_models_path"]
         if not models_path:
-            raise ValueError("Models path not configured")
+            log.error("Models path not configured")
+            return False
 
-        output_path = self._generate_cache_folder(metadata, file)
-        if not output_path:
-            raise ValueError("Failed to generate cache folder path")
+        try:
+            output_path = self._generate_cache_folder(metadata, file)
+            if not output_path:
+                log.error("Failed to generate cache folder path")
+                return False
+        except Exception as e:
+            log.error(f"Error generating cache folder: {e}")
+            return False
         
         moods = []
         tags = []
@@ -158,12 +204,12 @@ class AcousticBrainzNG:
             model_json_path = os.path.join(models_path, f"{model}.json")
             if not os.path.exists(model_json_path):
                 log.error(f"Model JSON metadata not found: {model_json_path}")
-                return
+                return False
             
             output_file_path = os.path.join(output_path, f"{output}.json")
             if not os.path.exists(output_file_path):
                 log.error(f"Output file not found: {output_file_path}")
-                return
+                return False
             
             output_data = {}
             model_metadata = {}
@@ -176,15 +222,15 @@ class AcousticBrainzNG:
                     output_data = json.load(f)
             except (FileNotFoundError, json.JSONDecodeError) as e:
                 log.error(f"Error reading model or output file: {e}")
-                return
+                return False
 
             if not output_data["predictions"] or not output_data["predictions"]["mean"]:
                 log.error(f"No predictions found in output data for {model}")
-                return
+                return False
             
             if not model_metadata["classes"] or len(model_metadata["classes"]) != len(output_data["predictions"]["mean"]):
                 log.error(f"No or invalid classes defined in model metadata for {model}")
-                return
+                return False
 
             if len(model_metadata["classes"]) == 2:
                 values = output_data["predictions"]["mean"]
@@ -222,59 +268,72 @@ class AcousticBrainzNG:
                     gaia_data = json.load(f)
             except (FileNotFoundError, json.JSONDecodeError) as e:
                 log.error(f"Error reading Gaia JSON file: {e}")
-                return
+                return False
         else:
             log.error(f"Gaia JSON file not found: {gaia_json_path}")
-            return
+            return False
 
-        metadata["bpm"] = int(round(gaia_data["rhythm"]["bpm"]))
-        
-        if config.setting["acousticbrainz_ng_save_raw"]:
-            metadata["ab:lo:tonal:chords_changes_rate"] = gaia_data["tonal"]["chords_changes_rate"]
-            metadata["ab:lo:tonal:chords_key"] = gaia_data["tonal"]["chords_key"]
-            metadata["ab:lo:tonal:chords_scale"] = gaia_data["tonal"]["chords_scale"]
-        
-        highestStrength = -1
-        selectedAlgorithm = None
-        
-        for algorithm in GAIA_KEY_ALGORITHMS:
-            key_data = gaia_data["tonal"][f"key_{algorithm}"]
-
-            if key_data["strength"] > highestStrength:
-                highestStrength = key_data["strength"]
-                selectedAlgorithm = algorithm
-        
-        if selectedAlgorithm:
-            selected_key_data = gaia_data["tonal"][f"key_{selectedAlgorithm}"]
-
-            metadata["key"] = "o" if selected_key_data["scale"] == "off" else f"{selected_key_data['key']}{'m' if selected_key_data['scale'] == 'minor' else ''}"
-
+        try:
+            metadata["bpm"] = int(round(gaia_data["rhythm"]["bpm"]))
+            
             if config.setting["acousticbrainz_ng_save_raw"]:
-                metadata["ab:lo:tonal:key_scale"] = selected_key_data["scale"]
-                metadata["ab:lo:tonal:key_key"] = selected_key_data["key"]
+                metadata["ab:lo:tonal:chords_changes_rate"] = gaia_data["tonal"]["chords_changes_rate"]
+                metadata["ab:lo:tonal:chords_key"] = gaia_data["tonal"]["chords_key"]
+                metadata["ab:lo:tonal:chords_scale"] = gaia_data["tonal"]["chords_scale"]
+            
+            highestStrength = -1
+            selectedAlgorithm = None
+            
+            for algorithm in GAIA_KEY_ALGORITHMS:
+                key_data = gaia_data["tonal"][f"key_{algorithm}"]
+
+                if key_data["strength"] > highestStrength:
+                    highestStrength = key_data["strength"]
+                    selectedAlgorithm = algorithm
+            
+            if selectedAlgorithm:
+                selected_key_data = gaia_data["tonal"][f"key_{selectedAlgorithm}"]
+
+                metadata["key"] = "o" if selected_key_data["scale"] == "off" else f"{selected_key_data['key']}{'m' if selected_key_data['scale'] == 'minor' else ''}"
+
+                if config.setting["acousticbrainz_ng_save_raw"]:
+                    metadata["ab:lo:tonal:key_scale"] = selected_key_data["scale"]
+                    metadata["ab:lo:tonal:key_key"] = selected_key_data["key"]
+            
+            return True
+        except Exception as e:
+            log.error(f"Error processing gaia data: {e}")
+            return False
     
-    def parse_optional(self, metadata: Dict, file: str) -> None:
+    def parse_optional(self, metadata: Dict, file: str) -> bool:
         if not self._check_optional_models():
-            raise ValueError("Optional models not found")
+            log.error("Optional models not found")
+            return False
         
         models_path = config.setting["acousticbrainz_ng_models_path"]
         if not models_path:
-            raise ValueError("Models path not configured")
+            log.error("Models path not configured")
+            return False
 
-        output_path = self._generate_cache_folder(metadata, file)
-        if not output_path:
-            raise ValueError("Failed to generate cache folder path")
+        try:
+            output_path = self._generate_cache_folder(metadata, file)
+            if not output_path:
+                log.error("Failed to generate cache folder path")
+                return False
+        except Exception as e:
+            log.error(f"Error generating cache folder: {e}")
+            return False
         
         for model, output in OPTIONAL_MODELS:
             model_json_path = os.path.join(models_path, f"{model}.json")
             if not os.path.exists(model_json_path):
                 log.error(f"Model JSON metadata not found: {model_json_path}")
-                return
+                return False
             
             output_file_path = os.path.join(output_path, f"{output}.json")
             if not os.path.exists(output_file_path):
                 log.error(f"Output file not found: {output_file_path}")
-                return
+                return False
             
             output_data = {}
             model_metadata = {}
@@ -287,19 +346,21 @@ class AcousticBrainzNG:
                     output_data = json.load(f)
             except (FileNotFoundError, json.JSONDecodeError) as e:
                 log.error(f"Error reading model or output file: {e}")
-                return
+                return False
 
             if not output_data["predictions"] or not output_data["predictions"]["mean"]:
                 log.error(f"No predictions found in output data for {model}")
-                return
+                return False
             
             if not model_metadata["classes"] or len(model_metadata["classes"]) != len(output_data["predictions"]["mean"]):
                 log.error(f"No or invalid classes defined in model metadata for {model}")
-                return
+                return False
             
             if config.setting["acousticbrainz_ng_save_raw"]:
                 for i in range(len(output_data["predictions"]["mean"])):
                     metadata[f"ab:hi:{output}:{model_metadata['classes'][i].replace('non', 'not').replace('_', ' ').lower()}"] = output_data["predictions"]["mean"][i]
+
+        return True
 
     @staticmethod
     def _format_class(class_name: str) -> str:
@@ -350,8 +411,14 @@ class AcousticBrainzNG:
                 for line in result.stdout.strip().split('\n'):
                     if line.startswith('MD5:'):
                         return line.split('MD5:')[1].strip()
+            else:
+                log.error(f"MD5 binary {binary_path} failed on file {file_path} with exit code {result.returncode}")
+                if result.stdout:
+                    log.error(f"MD5 stdout: {result.stdout}")
+                if result.stderr:
+                    log.error(f"MD5 stderr: {result.stderr}")
             
-            log.error(f"Failed to calculate audio hash: {result.stderr}")
+            log.error(f"Failed to calculate audio hash for file {file_path}: MD5 not found in output")
             
         except Exception as e:
             log.error(f"Error calculating audio hash: {e}")
@@ -407,6 +474,14 @@ class AcousticBrainzNG:
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
+            if replaygain_lufs_result.returncode != 0:
+                log.error(f"FFmpeg failed for ReplayGain LUFS calculation on file {file_path} with exit code {replaygain_lufs_result.returncode}")
+                if replaygain_lufs_result.stdout:
+                    log.error(f"FFmpeg stdout: {replaygain_lufs_result.stdout}")
+                if replaygain_lufs_result.stderr:
+                    log.error(f"FFmpeg stderr: {replaygain_lufs_result.stderr}")
+                return {}
+            
             replaygain_gain = None
             replaygain_peak = None
             replaygain_range = None
@@ -448,6 +523,14 @@ class AcousticBrainzNG:
                 env=ENV,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
+            
+            if r128_result.returncode != 0:
+                log.error(f"FFmpeg failed for R128 calculation on file {file_path} with exit code {r128_result.returncode}")
+                if r128_result.stdout:
+                    log.error(f"FFmpeg stdout: {r128_result.stdout}")
+                if r128_result.stderr:
+                    log.error(f"FFmpeg stderr: {r128_result.stderr}")
+                return result
             
             r128_track_gain = None
             
@@ -508,6 +591,15 @@ class AcousticBrainzNG:
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                 )
                 
+                if album_replaygain_result.returncode != 0:
+                    log.error(f"FFmpeg failed for album ReplayGain calculation on {len(album_track_files)} files with exit code {album_replaygain_result.returncode}")
+                    log.error(f"Album files: {', '.join(album_track_files)}")
+                    if album_replaygain_result.stdout:
+                        log.error(f"FFmpeg stdout: {album_replaygain_result.stdout}")
+                    if album_replaygain_result.stderr:
+                        log.error(f"FFmpeg stderr: {album_replaygain_result.stderr}")
+                    return {}
+                
                 album_gain = None
                 album_peak = None
                 album_range = None
@@ -550,6 +642,15 @@ class AcousticBrainzNG:
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                 )
                 
+                if album_r128_result.returncode != 0:
+                    log.error(f"FFmpeg failed for album R128 calculation on {len(album_track_files)} files with exit code {album_r128_result.returncode}")
+                    log.error(f"Album files: {', '.join(album_track_files)}")
+                    if album_r128_result.stdout:
+                        log.error(f"FFmpeg stdout: {album_r128_result.stdout}")
+                    if album_r128_result.stderr:
+                        log.error(f"FFmpeg stderr: {album_r128_result.stderr}")
+                    return result
+                
                 r128_album_gain = None
                 
                 try:
@@ -584,15 +685,20 @@ class AcousticBrainzNG:
             log.error(f"Error calculating album loudness: {e}")
             return {}
 
-    def calculate_loudness(self, metadata: Dict, file_path: str, album: Optional[Album] = None) -> None:
+    def calculate_loudness(self, metadata: Dict, file_path: str, album: Optional[Album] = None) -> bool:
         try:
             cache_folder = self._generate_cache_folder(metadata, file_path)
             loudness_file = os.path.join(cache_folder, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
 
             if os.path.exists(loudness_file):
-                return
+                return True
 
             track_loudness = self.calculate_track_loudness(file_path)
+            
+            # Check if track loudness calculation failed
+            if not track_loudness:
+                log.error("Failed to calculate track loudness")
+                return False
 
             album_loudness = {}
             if album is not None:
@@ -616,6 +722,10 @@ class AcousticBrainzNG:
                             album_loudness["r128_album_gain"] = track_loudness.get("r128_track_gain")
                     else:
                         album_loudness = self.calculate_album_loudness(album_track_files)
+                        # Check if album loudness calculation failed
+                        if not album_loudness:
+                            log.error("Failed to calculate album loudness")
+                            # Continue with track-only data
 
                     album_data = {
                         "track_count": len(album_track_files),
@@ -638,6 +748,7 @@ class AcousticBrainzNG:
                                 album_loudness["r128_album_gain"] = album_data.get('r128_album_gain')
                     except (FileNotFoundError, json.JSONDecodeError) as e:
                         log.error(f"Error reading album data file: {e}")
+                        # Continue without album loudness data
 
             loudness_data = {
                 **track_loudness,
@@ -646,18 +757,26 @@ class AcousticBrainzNG:
             
             with open(loudness_file, 'w', encoding='utf-8') as f:
                 json.dump(loudness_data, f, indent=2)
+            
+            return True
         except Exception as e:
             log.error(f"Error calculating loudness: {e}")
+            return False
     
-    def parse_loudness(self, metadata: Dict, file: str) -> None:
-        output_path = self._generate_cache_folder(metadata, file)
-        if not output_path:
-            raise ValueError("Failed to generate cache folder path")
+    def parse_loudness(self, metadata: Dict, file: str) -> bool:
+        try:
+            output_path = self._generate_cache_folder(metadata, file)
+            if not output_path:
+                log.error("Failed to generate cache folder path")
+                return False
+        except Exception as e:
+            log.error(f"Error generating cache folder: {e}")
+            return False
 
         loudness_file = os.path.join(output_path, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
         if not os.path.exists(loudness_file):
             log.error(f"Loudness file not found: {loudness_file}")
-            return
+            return False
         
         loudness_data = {}
         
@@ -666,46 +785,52 @@ class AcousticBrainzNG:
                 loudness_data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError) as e:
             log.error(f"Error reading loudness file: {e}")
-            return
+            return False
 
-        is_opus = self._is_opus_file(file)
+        try:
+            is_opus = self._is_opus_file(file)
 
-        replaygain_track_gain = loudness_data.get("replaygain_track_gain")
-        if replaygain_track_gain is not None:
-            metadata["replaygain_track_gain"] = f"{replaygain_track_gain} dB"
-        
-        replaygain_track_peak = loudness_data.get("replaygain_track_peak")
-        if replaygain_track_peak is not None:
-            metadata["replaygain_track_peak"] = replaygain_track_peak
-        
-        replaygain_track_range = loudness_data.get("replaygain_track_range")
-        if replaygain_track_range is not None:
-            metadata["replaygain_track_range"] = f"{replaygain_track_range} dB"
-        
-        replaygain_album_gain = loudness_data.get("replaygain_album_gain")
-        if replaygain_album_gain is not None:
-            metadata["replaygain_album_gain"] = f"{replaygain_album_gain} dB"
-        
-        replaygain_album_peak = loudness_data.get("replaygain_album_peak")
-        if replaygain_album_peak is not None:
-            metadata["replaygain_album_peak"] = replaygain_album_peak
-        
-        replaygain_album_range = loudness_data.get("replaygain_album_range")
-        if replaygain_album_range is not None:
-            metadata["replaygain_album_range"] = f"{replaygain_album_range} dB"
-        
-        replaygain_reference_loudness = loudness_data.get("replaygain_reference_loudness")
-        if replaygain_reference_loudness is not None:
-            metadata["replaygain_reference_loudness"] = f"{replaygain_reference_loudness} LUFS"
-        
-        if is_opus:
-            r128_track_gain = loudness_data.get("r128_track_gain")
-            if r128_track_gain is not None:
-                metadata["r128_track_gain"] = r128_track_gain
+            replaygain_track_gain = loudness_data.get("replaygain_track_gain")
+            if replaygain_track_gain is not None:
+                metadata["replaygain_track_gain"] = f"{replaygain_track_gain} dB"
             
-            r128_album_gain = loudness_data.get("r128_album_gain")
-            if r128_album_gain is not None:
-                metadata["r128_album_gain"] = r128_album_gain
+            replaygain_track_peak = loudness_data.get("replaygain_track_peak")
+            if replaygain_track_peak is not None:
+                metadata["replaygain_track_peak"] = replaygain_track_peak
+            
+            replaygain_track_range = loudness_data.get("replaygain_track_range")
+            if replaygain_track_range is not None:
+                metadata["replaygain_track_range"] = f"{replaygain_track_range} dB"
+            
+            replaygain_album_gain = loudness_data.get("replaygain_album_gain")
+            if replaygain_album_gain is not None:
+                metadata["replaygain_album_gain"] = f"{replaygain_album_gain} dB"
+            
+            replaygain_album_peak = loudness_data.get("replaygain_album_peak")
+            if replaygain_album_peak is not None:
+                metadata["replaygain_album_peak"] = replaygain_album_peak
+            
+            replaygain_album_range = loudness_data.get("replaygain_album_range")
+            if replaygain_album_range is not None:
+                metadata["replaygain_album_range"] = f"{replaygain_album_range} dB"
+            
+            replaygain_reference_loudness = loudness_data.get("replaygain_reference_loudness")
+            if replaygain_reference_loudness is not None:
+                metadata["replaygain_reference_loudness"] = f"{replaygain_reference_loudness} LUFS"
+            
+            if is_opus:
+                r128_track_gain = loudness_data.get("r128_track_gain")
+                if r128_track_gain is not None:
+                    metadata["r128_track_gain"] = r128_track_gain
+                
+                r128_album_gain = loudness_data.get("r128_album_gain")
+                if r128_album_gain is not None:
+                    metadata["r128_album_gain"] = r128_album_gain
+
+            return True
+        except Exception as e:
+            log.error(f"Error parsing loudness data: {e}")
+            return False
 
 acousticbrainz_ng = AcousticBrainzNG()
 
@@ -713,18 +838,41 @@ class AcousticBrainzNGAction(BaseAction):
     NAME = f"Analyze with {PLUGIN_NAME}"
     
     def _process_track(self, track: Track, album: Optional[Album] = None) -> None:
+        window = self.tagger.window
+
         for file in track.files:
-            acousticbrainz_ng.analyze_required(file.metadata, file.filename)
-            acousticbrainz_ng.parse_required(file.metadata, file.filename)
-            
+            ar_result = acousticbrainz_ng.analyze_required(file.metadata, file.filename)
+            pr_result = acousticbrainz_ng.parse_required(file.metadata, file.filename)
+
+            if not ar_result or not pr_result:
+                log.error(f"Failed to analyze required models for {file.filename}")
+                window.set_statusbar_message(f"Failed to analyze required models for {file.filename}")
+                continue
+            else:
+                window.set_statusbar_message(f"Analyzed required models for {file.filename}")
+
             if config.setting["acousticbrainz_ng_analyze_optional"]:
-                acousticbrainz_ng.analyze_optional(file.metadata, file.filename)
-                acousticbrainz_ng.parse_optional(file.metadata, file.filename)
-            
+                ao_result = acousticbrainz_ng.analyze_optional(file.metadata, file.filename)
+                ap_result = acousticbrainz_ng.parse_optional(file.metadata, file.filename)
+                
+                if not ao_result or not ap_result:
+                    log.error(f"Failed to analyze optional models for {file.filename}")
+                    window.set_statusbar_message(f"Failed to analyze optional models for {file.filename}")
+                else:
+                    window.set_statusbar_message(f"Analyzed optional models for {file.filename}")
+
             if config.setting["acousticbrainz_ng_calculate_replaygain"]:
-                acousticbrainz_ng.calculate_loudness(file.metadata, file.filename, album)
-                acousticbrainz_ng.parse_loudness(file.metadata, file.filename)
-    
+                cl_result = acousticbrainz_ng.calculate_loudness(file.metadata, file.filename, album)
+                pl_result = acousticbrainz_ng.parse_loudness(file.metadata, file.filename)
+                
+                if not cl_result or not pl_result:
+                    log.error(f"Failed to calculate loudness for {file.filename}")
+                    window.set_statusbar_message(f"Failed to calculate loudness for {file.filename}")
+                else:
+                    window.set_statusbar_message(f"Analyzed loudness for {file.filename}")
+
+            window.set_statusbar_message(f"Analyzed {file.filename} with {PLUGIN_NAME}")
+
     def callback(self, objs):
         for item in (t for t in objs if isinstance(t, Track) or isinstance(t, Album)):
             if isinstance(item, Track):
@@ -885,8 +1033,15 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             if result.returncode != 0 or "ffmpeg version" not in result.stdout:
                 missing_binaries.append("FFmpeg (invalid executable)")
-        except Exception:
+                if result.returncode != 0:
+                    log.error(f"FFmpeg version check failed with exit code {result.returncode}")
+                    if result.stdout:
+                        log.error(f"FFmpeg stdout: {result.stdout}")
+                    if result.stderr:
+                        log.error(f"FFmpeg stderr: {result.stderr}")
+        except Exception as e:
             missing_binaries.append("FFmpeg (unable to execute)")
+            log.error(f"Exception running FFmpeg version check: {e}")
         
         if missing_binaries:
             message = f"Missing binaries:\n" + "\n".join(f"• {binary}" for binary in missing_binaries)
