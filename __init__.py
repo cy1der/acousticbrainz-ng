@@ -846,10 +846,10 @@ class AcousticBrainzNGAction(BaseAction):
 
             if not ar_result or not pr_result:
                 log.error(f"Failed to analyze required models for {file.filename}")
-                window.set_statusbar_message(f"Failed to analyze required models for {file.filename}")
+                window.set_statusbar_message("Failed to analyze required models for %s", file.filename)
                 continue
             else:
-                window.set_statusbar_message(f"Analyzed required models for {file.filename}")
+                window.set_statusbar_message("Analyzed required models for %s", file.filename)
 
             if config.setting["acousticbrainz_ng_analyze_optional"]:
                 ao_result = acousticbrainz_ng.analyze_optional(file.metadata, file.filename)
@@ -857,9 +857,9 @@ class AcousticBrainzNGAction(BaseAction):
                 
                 if not ao_result or not ap_result:
                     log.error(f"Failed to analyze optional models for {file.filename}")
-                    window.set_statusbar_message(f"Failed to analyze optional models for {file.filename}")
+                    window.set_statusbar_message("Failed to analyze optional models for %s", file.filename)
                 else:
-                    window.set_statusbar_message(f"Analyzed optional models for {file.filename}")
+                    window.set_statusbar_message("Analyzed optional models for %s", file.filename)
 
             if config.setting["acousticbrainz_ng_calculate_replaygain"]:
                 cl_result = acousticbrainz_ng.calculate_loudness(file.metadata, file.filename, album)
@@ -867,11 +867,11 @@ class AcousticBrainzNGAction(BaseAction):
                 
                 if not cl_result or not pl_result:
                     log.error(f"Failed to calculate loudness for {file.filename}")
-                    window.set_statusbar_message(f"Failed to calculate loudness for {file.filename}")
+                    window.set_statusbar_message("Failed to calculate loudness for %s", file.filename)
                 else:
-                    window.set_statusbar_message(f"Analyzed loudness for {file.filename}")
+                    window.set_statusbar_message("Analyzed loudness for %s", file.filename)
 
-            window.set_statusbar_message(f"Analyzed {file.filename} with {PLUGIN_NAME}")
+            window.set_statusbar_message("Analyzed %s with %s", file.filename, PLUGIN_NAME)
 
     def callback(self, objs):
         for item in (t for t in objs if isinstance(t, Track) or isinstance(t, Album)):
