@@ -5,6 +5,8 @@ import hashlib
 import threading
 import concurrent.futures
 import tempfile
+import re
+from functools import partial
 from typing import List, Tuple, Dict, Optional
 
 from picard import config, log
@@ -16,7 +18,23 @@ from picard.ui.itemviews import (
 from picard.track import Track
 from picard.album import Album
 from picard.ui.options import OptionsPage, register_options_page
-from PyQt5 import QtWidgets
+from picard.util import thread
+from PyQt5 import QtWidgets, QtCore
+
+_analysis_semaphore = None
+_current_max_concurrent = 0
+
+def _get_analysis_semaphore():
+    global _analysis_semaphore, _current_max_concurrent
+    
+    max_concurrent = config.setting["acousticbrainz_ng_max_concurrent_analyses"] or 2
+    
+    if _analysis_semaphore is None or _current_max_concurrent != max_concurrent:
+        _analysis_semaphore = threading.Semaphore(max_concurrent)
+        _current_max_concurrent = max_concurrent
+        log.debug(f"Created analysis semaphore with limit: {max_concurrent}")
+    
+    return _analysis_semaphore
 
 from .constants import *
 
@@ -695,7 +713,6 @@ class AcousticBrainzNG:
 
             track_loudness = self.calculate_track_loudness(file_path)
             
-            # Check if track loudness calculation failed
             if not track_loudness:
                 log.error("Failed to calculate track loudness")
                 return False
@@ -722,10 +739,8 @@ class AcousticBrainzNG:
                             album_loudness["r128_album_gain"] = track_loudness.get("r128_track_gain")
                     else:
                         album_loudness = self.calculate_album_loudness(album_track_files)
-                        # Check if album loudness calculation failed
                         if not album_loudness:
                             log.error("Failed to calculate album loudness")
-                            # Continue with track-only data
 
                     album_data = {
                         "track_count": len(album_track_files),
@@ -748,7 +763,6 @@ class AcousticBrainzNG:
                                 album_loudness["r128_album_gain"] = album_data.get('r128_album_gain')
                     except (FileNotFoundError, json.JSONDecodeError) as e:
                         log.error(f"Error reading album data file: {e}")
-                        # Continue without album loudness data
 
             loudness_data = {
                 **track_loudness,
@@ -834,52 +848,181 @@ class AcousticBrainzNG:
 
 acousticbrainz_ng = AcousticBrainzNG()
 
+def analyze_track(track: Track, album: Optional[Album] = None) -> Dict:
+    results = {
+        'track': track,
+        'album': album,
+        'success': True,
+        'errors': [],
+        'files_processed': 0
+    }
+
+    semaphore = _get_analysis_semaphore()
+    semaphore.acquire()
+    
+    try:
+        for file in track.files:
+            try:
+                ar_result = acousticbrainz_ng.analyze_required(file.metadata, file.filename)
+                pr_result = acousticbrainz_ng.parse_required(file.metadata, file.filename)
+
+                if not ar_result or not pr_result:
+                    error_msg = f"Failed to analyze required models for {file.filename}"
+                    log.error(error_msg)
+                    results['errors'].append(error_msg)
+                    results['success'] = False
+                    continue
+
+                if config.setting["acousticbrainz_ng_analyze_optional"]:
+                    ao_result = acousticbrainz_ng.analyze_optional(file.metadata, file.filename)
+                    ap_result = acousticbrainz_ng.parse_optional(file.metadata, file.filename)
+                    
+                    if not ao_result or not ap_result:
+                        error_msg = f"Failed to analyze optional models for {file.filename}"
+                        log.error(error_msg)
+                        results['errors'].append(error_msg)
+                        
+                if config.setting["acousticbrainz_ng_calculate_replaygain"]:
+                    cl_result = acousticbrainz_ng.calculate_loudness(file.metadata, file.filename, album)
+                    pl_result = acousticbrainz_ng.parse_loudness(file.metadata, file.filename)
+                    
+                    if not cl_result or not pl_result:
+                        error_msg = f"Failed to calculate loudness for {file.filename}"
+                        log.error(error_msg)
+                        results['errors'].append(error_msg)
+
+                results['files_processed'] += 1
+
+            except Exception as e:
+                error_msg = f"Unexpected error analyzing {file.filename}: {str(e)}"
+                log.error(error_msg)
+                results['errors'].append(error_msg)
+                results['success'] = False
+    finally:
+        semaphore.release()
+
+    return results
+
 class AcousticBrainzNGAction(BaseAction):
     NAME = f"Analyze with {PLUGIN_NAME}"
     
-    def _process_track(self, track: Track, album: Optional[Album] = None) -> None:
-        window = self.tagger.window
+    def __init__(self):
+        super().__init__()
+        self.num_tracks = 0
+        self.current = 0
+    
+    def _get_pending(self) -> int:
+        label = self.tagger.window.status_indicators[0].val4
+        
+        try:
+            pending = int(label.text() or "0")
+        except ValueError:
+            m = re.search(r"(\d+)", label.text())
+            pending = int(m.group(1)) if m else 0
 
-        for file in track.files:
-            ar_result = acousticbrainz_ng.analyze_required(file.metadata, file.filename)
-            pr_result = acousticbrainz_ng.parse_required(file.metadata, file.filename)
+        return pending
 
-            if not ar_result or not pr_result:
-                log.error(f"Failed to analyze required models for {file.filename}")
-                window.set_statusbar_message("Failed to analyze required models for %s", file.filename)
-                continue
+    def _update_pending_count(self, delta: int):
+        label = self.tagger.window.status_indicators[0].val4
+        pending = self._get_pending()
+        label.setNum(pending + delta)
+
+    def _format_progress(self):
+        if self.num_tracks <= 1:
+            return ""
+        else:
+            self.current += 1
+            return f" ({self.current}/{self.num_tracks})"
+
+    def _analysis_callback(self, result=None, error=None):
+        progress = self._format_progress()
+        
+        if error is None and result:
+            track = result['track']
+            album = result['album']
+            
+            for file in track.files:
+                file.update()
+            track.update()
+            if album:
+                album.update()
+            
+            if result['success'] and not result['errors']:
+                if album:
+                    album_name = album.metadata.get('album', 'Unknown Album')
+                    track_name = track.metadata.get('title', 'Unknown Track')
+                    self.tagger.window.set_statusbar_message(
+                        'Successfully analyzed "%s" from "%s"%s.', track_name, album_name, progress
+                    )
+                else:
+                    track_name = track.metadata.get('title', 'Unknown Track')
+                    self.tagger.window.set_statusbar_message(
+                        'Successfully analyzed "%s"%s.', track_name, progress
+                    )
             else:
-                window.set_statusbar_message("Analyzed required models for %s", file.filename)
-
-            if config.setting["acousticbrainz_ng_analyze_optional"]:
-                ao_result = acousticbrainz_ng.analyze_optional(file.metadata, file.filename)
-                ap_result = acousticbrainz_ng.parse_optional(file.metadata, file.filename)
-                
-                if not ao_result or not ap_result:
-                    log.error(f"Failed to analyze optional models for {file.filename}")
-                    window.set_statusbar_message("Failed to analyze optional models for %s", file.filename)
+                track_name = track.metadata.get('title', 'Unknown Track')
+                if result['files_processed'] > 0:
+                    self.tagger.window.set_statusbar_message(
+                        'Partially analyzed "%s" with warnings%s.', track_name, progress
+                    )
                 else:
-                    window.set_statusbar_message("Analyzed optional models for %s", file.filename)
+                    self.tagger.window.set_statusbar_message(
+                        'Failed to analyze "%s"%s.', track_name, progress
+                    )
+        else:
+            track_name = "Unknown Track"
+            if result and result.get('track'):
+                track_name = result['track'].metadata.get('title', 'Unknown Track')
+            
+            error_msg = str(error) if error else "Unknown error"
+            log.error(f"Analysis failed for {track_name}: {error_msg}")
+            self.tagger.window.set_statusbar_message(
+                'Failed to analyze "%s"%s.', track_name, progress
+            )
 
-            if config.setting["acousticbrainz_ng_calculate_replaygain"]:
-                cl_result = acousticbrainz_ng.calculate_loudness(file.metadata, file.filename, album)
-                pl_result = acousticbrainz_ng.parse_loudness(file.metadata, file.filename)
-                
-                if not cl_result or not pl_result:
-                    log.error(f"Failed to calculate loudness for {file.filename}")
-                    window.set_statusbar_message("Failed to calculate loudness for %s", file.filename)
-                else:
-                    window.set_statusbar_message("Analyzed loudness for %s", file.filename)
-
-            window.set_statusbar_message("Analyzed %s with %s", file.filename, PLUGIN_NAME)
+        files_count = len(result['track'].files) if result and result.get('track') else 1
+        self._update_pending_count(-files_count)
 
     def callback(self, objs):
-        for item in (t for t in objs if isinstance(t, Track) or isinstance(t, Album)):
+        tracks_and_albums = [t for t in objs if isinstance(t, Track) or isinstance(t, Album)]
+        
+        if not tracks_and_albums:
+            return
+        
+        total_files = 0
+        tracks_to_process = []
+        
+        for item in tracks_and_albums:
             if isinstance(item, Track):
-                self._process_track(item)
+                total_files += len(item.files)
+                tracks_to_process.append((item, None))
             elif isinstance(item, Album):
                 for track in item.tracks:
-                    self._process_track(track, item)
+                    total_files += len(track.files)
+                    tracks_to_process.append((track, item))
+        
+        if not tracks_to_process:
+            return
+        
+        self.num_tracks = len(tracks_to_process)
+        self.current = 0
+        
+        self._update_pending_count(total_files)
+        
+        if self.num_tracks == 1:
+            track, album = tracks_to_process[0]
+            track_name = track.metadata.get('title', 'Unknown Track')
+            self.tagger.window.set_statusbar_message('Analyzing "%s" with %s...', track_name, PLUGIN_NAME)
+        else:
+            self.tagger.window.set_statusbar_message('Analyzing %i tracks with %s...', self.num_tracks, PLUGIN_NAME)
+        
+        log.debug(f"Analyzing {total_files} files from {self.num_tracks} tracks with {PLUGIN_NAME}")
+
+        for track, album in tracks_to_process:
+            thread.run_task(
+                partial(analyze_track, track, album),
+                self._analysis_callback
+            )
 
 class AcousticBrainzNGOptionsPage(OptionsPage):
     NAME = "acousticbrainz_ng"
@@ -924,18 +1067,30 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.calculate_replaygain_checkbox.setToolTip("Calculate ReplayGain values for the track and album")
         
         musicnn_workers_layout = QtWidgets.QHBoxLayout()
+        concurrent_analyses_layout = QtWidgets.QHBoxLayout()
         rg_reference_layout = QtWidgets.QHBoxLayout()
         
-        musicnn_workers_label = QtWidgets.QLabel("Max MusicNN workers:", self)
+        musicnn_workers_label = QtWidgets.QLabel("Max MusicNN processes:", self)
         musicnn_workers_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.musicnn_workers_input = QtWidgets.QSpinBox(self)
-        self.musicnn_workers_input.setToolTip("Maximum number of concurrent MusicNN workers")
+        self.musicnn_workers_input.setToolTip("Maximum number of concurrent MusicNN processes")
         self.musicnn_workers_input.setRange(1, max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS)))
         self.musicnn_workers_input.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
         
         musicnn_workers_layout.addWidget(musicnn_workers_label)
         musicnn_workers_layout.addStretch()
         musicnn_workers_layout.addWidget(self.musicnn_workers_input)
+        
+        concurrent_analyses_label = QtWidgets.QLabel("Max concurrent analyses:", self)
+        concurrent_analyses_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.concurrent_analyses_input = QtWidgets.QSpinBox(self)
+        self.concurrent_analyses_input.setToolTip("Maximum number of tracks analyzed simultaneously")
+        self.concurrent_analyses_input.setRange(1, 8)
+        self.concurrent_analyses_input.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
+        
+        concurrent_analyses_layout.addWidget(concurrent_analyses_label)
+        concurrent_analyses_layout.addStretch()
+        concurrent_analyses_layout.addWidget(self.concurrent_analyses_input)
         
         rg_reference_label = QtWidgets.QLabel("ReplayGain reference loudness (LUFS):", self)
         rg_reference_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -953,8 +1108,33 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         options_layout.addWidget(self.analyze_optional_checkbox)
         options_layout.addWidget(self.save_raw_checkbox)
         options_layout.addWidget(self.calculate_replaygain_checkbox)
+        options_layout.addLayout(concurrent_analyses_layout)
         options_layout.addLayout(musicnn_workers_layout)
+        
+        concurrent_processes_layout = QtWidgets.QHBoxLayout()
+        concurrent_processes_label = QtWidgets.QLabel("Max concurrent processes:", self)
+        concurrent_processes_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.concurrent_processes_display = QtWidgets.QLabel("0", self)
+        self.concurrent_processes_display.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.concurrent_processes_display.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+
+        concurrent_processes_layout.addWidget(concurrent_processes_label)
+        concurrent_processes_layout.addStretch()
+        concurrent_processes_layout.addWidget(self.concurrent_processes_display)
+
+        def update_concurrent_processes():
+            concurrent_analyses = self.concurrent_analyses_input.value()
+            musicnn_workers = self.musicnn_workers_input.value()
+            max_processes = concurrent_analyses + (concurrent_analyses * musicnn_workers)
+            breakdown = f"[{concurrent_analyses} gaia processes + ({concurrent_analyses} × {musicnn_workers}) MusicNN processes]"
+            self.concurrent_processes_display.setText(f"{breakdown} = <span style='font-weight: bold;'>{max_processes}</span>")
+
+        self.concurrent_analyses_input.valueChanged.connect(update_concurrent_processes)
+        self.musicnn_workers_input.valueChanged.connect(update_concurrent_processes)
+
         options_layout.addLayout(rg_reference_layout)
+
+        options_layout.addLayout(concurrent_processes_layout)
 
         layout.addWidget(options_group)
 
@@ -1119,6 +1299,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.rg_reference_input.setEnabled(self.calculate_replaygain_checkbox.isChecked())
         
         self.musicnn_workers_input.setValue(config.setting["acousticbrainz_ng_max_musicnn_workers"] or 4)
+        self.concurrent_analyses_input.setValue(config.setting["acousticbrainz_ng_max_concurrent_analyses"] or 2)
         self.rg_reference_input.setValue(config.setting["acousticbrainz_ng_replaygain_reference_loudness"] or -18)
 
         self.binaries_path_input.setText(config.setting["acousticbrainz_ng_binaries_path"])
@@ -1136,6 +1317,9 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         max_workers = max(1, min(self.musicnn_workers_input.value(), max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))))
         config.setting["acousticbrainz_ng_max_musicnn_workers"] = max_workers
+        
+        max_concurrent = max(1, min(self.concurrent_analyses_input.value(), 8))
+        config.setting["acousticbrainz_ng_max_concurrent_analyses"] = max_concurrent
         
         rg_reference = max(-30, min(self.rg_reference_input.value(), -5))
         config.setting["acousticbrainz_ng_replaygain_reference_loudness"] = rg_reference

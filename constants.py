@@ -60,6 +60,7 @@ CONFIG_OPTIONS = [
     TextOption("setting", "acousticbrainz_ng_models_path", os.path.join(os.path.dirname(__file__), "models")),
     TextOption("setting", "acousticbrainz_ng_cache_path", os.path.join(os.path.dirname(__file__), "cache")),
     IntOption("setting", "acousticbrainz_ng_max_musicnn_workers", 4),
+    IntOption("setting", "acousticbrainz_ng_max_concurrent_analyses", 2),
     IntOption("setting", "acousticbrainz_ng_replaygain_reference_loudness", -18),
     BoolOption("setting", "acousticbrainz_ng_analyze_optional", False),
     BoolOption("setting", "acousticbrainz_ng_save_raw", False),
