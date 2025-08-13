@@ -12,17 +12,17 @@ This plugin is not affiliated with the <a href='https://acousticbrainz.org'>Acou
 This is not a 1:1 recreation of the AcousticBrainz schema, but will provide most of the meaningful data<br/>
 External dependencies:
 <ul>
-<li><a href='https://essentia.upf.edu'>Essentia</a> binaries compiled with TensorFlow and gaia2 support</li>
-<li>A few MusicNN models (see user guide for details)</li>
+<li><a href='https://essentia.upf.edu'>Essentia</a> binaries compiled with TensorFlow and gaia2 support (included)</li>
+<li>A few MusicNN models (included)</li>
 <li><a href='https://ffmpeg.org'>FFmpeg</a></li>
 </ul>
 <strong>This plugin is CPU heavy!</strong>
 """
 PLUGIN_VERSION = "1.0.0"
-PLUGIN_API_VERSIONS = ["2.7", "2.8", "2.9", "2.10", "2.11"]
+PLUGIN_API_VERSIONS = ["2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0-or-later"
 PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
-PLUGIN_USER_GUIDE_URL = "https://example.com" # TODO: Update with actual user guide URL
+PLUGIN_USER_GUIDE_URL = "https://github.com/cy1der/acousticbrainz-ng"
 
 REQUIRED_MODELS: List[Tuple[str, str]] = [
     ("msd-musicnn-1", "msd"),

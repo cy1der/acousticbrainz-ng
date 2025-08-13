@@ -912,7 +912,7 @@ class AcousticBrainzNGAction(BaseAction):
         self.current = 0
     
     def _get_pending(self) -> int:
-        label = self.tagger.window.status_indicators[0].val4
+        label = self.tagger.window.status_indicators[0].val4 # pyright: ignore[reportAttributeAccessIssue]
         
         try:
             pending = int(label.text() or "0")
@@ -923,7 +923,7 @@ class AcousticBrainzNGAction(BaseAction):
         return pending
 
     def _update_pending_count(self, delta: int):
-        label = self.tagger.window.status_indicators[0].val4
+        label = self.tagger.window.status_indicators[0].val4 # pyright: ignore[reportAttributeAccessIssue]
         pending = self._get_pending()
         label.setNum(pending + delta)
 
@@ -951,22 +951,22 @@ class AcousticBrainzNGAction(BaseAction):
                 if album:
                     album_name = album.metadata.get('album', 'Unknown Album')
                     track_name = track.metadata.get('title', 'Unknown Track')
-                    self.tagger.window.set_statusbar_message(
+                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
                         'Successfully analyzed "%s" from "%s"%s.', track_name, album_name, progress
                     )
                 else:
                     track_name = track.metadata.get('title', 'Unknown Track')
-                    self.tagger.window.set_statusbar_message(
+                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
                         'Successfully analyzed "%s"%s.', track_name, progress
                     )
             else:
                 track_name = track.metadata.get('title', 'Unknown Track')
                 if result['files_processed'] > 0:
-                    self.tagger.window.set_statusbar_message(
+                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
                         'Partially analyzed "%s" with warnings%s.', track_name, progress
                     )
                 else:
-                    self.tagger.window.set_statusbar_message(
+                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
                         'Failed to analyze "%s"%s.', track_name, progress
                     )
         else:
@@ -976,7 +976,7 @@ class AcousticBrainzNGAction(BaseAction):
             
             error_msg = str(error) if error else "Unknown error"
             log.error(f"Analysis failed for {track_name}: {error_msg}")
-            self.tagger.window.set_statusbar_message(
+            self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
                 'Failed to analyze "%s"%s.', track_name, progress
             )
 
@@ -1012,9 +1012,9 @@ class AcousticBrainzNGAction(BaseAction):
         if self.num_tracks == 1:
             track, album = tracks_to_process[0]
             track_name = track.metadata.get('title', 'Unknown Track')
-            self.tagger.window.set_statusbar_message('Analyzing "%s" with %s...', track_name, PLUGIN_NAME)
+            self.tagger.window.set_statusbar_message('Analyzing "%s" with %s...', track_name, PLUGIN_NAME) # pyright: ignore[reportAttributeAccessIssue]
         else:
-            self.tagger.window.set_statusbar_message('Analyzing %i tracks with %s...', self.num_tracks, PLUGIN_NAME)
+            self.tagger.window.set_statusbar_message('Analyzing %i tracks with %s...', self.num_tracks, PLUGIN_NAME) # pyright: ignore[reportAttributeAccessIssue]
         
         log.debug(f"Analyzing {total_files} files from {self.num_tracks} tracks with {PLUGIN_NAME}")
 
