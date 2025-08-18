@@ -2,6 +2,10 @@
 
 This plugin is not affiliated with the [AcousticBrainz](https://acousticbrainz.org) project.
 
+## Note
+
+Although compatible, the plugin will likely not work on Windows due to an access violation error (exit code 3221225477) when ran with Picard. If you have a fix or a workaround, please let me know.
+
 ## Features
 
 - Moods
