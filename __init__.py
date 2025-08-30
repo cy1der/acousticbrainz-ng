@@ -910,22 +910,6 @@ class AcousticBrainzNGAction(BaseAction):
         super().__init__()
         self.num_tracks = 0
         self.current = 0
-    
-    def _get_pending(self) -> int:
-        label = self.tagger.window.status_indicators[0].val4 # pyright: ignore[reportAttributeAccessIssue]
-        
-        try:
-            pending = int(label.text() or "0")
-        except ValueError:
-            m = re.search(r"(\d+)", label.text())
-            pending = int(m.group(1)) if m else 0
-
-        return pending
-
-    def _update_pending_count(self, delta: int):
-        label = self.tagger.window.status_indicators[0].val4 # pyright: ignore[reportAttributeAccessIssue]
-        pending = self._get_pending()
-        label.setNum(pending + delta)
 
     def _format_progress(self):
         if self.num_tracks <= 1:
@@ -980,9 +964,6 @@ class AcousticBrainzNGAction(BaseAction):
                 'Failed to analyze "%s"%s.', track_name, progress
             )
 
-        files_count = len(result['track'].files) if result and result.get('track') else 1
-        self._update_pending_count(-files_count)
-
     def callback(self, objs):
         tracks_and_albums = [t for t in objs if isinstance(t, Track) or isinstance(t, Album)]
         
@@ -1006,8 +987,6 @@ class AcousticBrainzNGAction(BaseAction):
         
         self.num_tracks = len(tracks_to_process)
         self.current = 0
-        
-        self._update_pending_count(total_files)
         
         if self.num_tracks == 1:
             track, album = tracks_to_process[0]
