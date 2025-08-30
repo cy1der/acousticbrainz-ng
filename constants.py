@@ -18,7 +18,7 @@ External dependencies:
 </ul>
 <strong>This plugin is CPU heavy!</strong>
 """
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 PLUGIN_API_VERSIONS = ["2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0-or-later"
 PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
@@ -64,7 +64,8 @@ CONFIG_OPTIONS = [
     IntOption("setting", "acousticbrainz_ng_replaygain_reference_loudness", -18),
     BoolOption("setting", "acousticbrainz_ng_analyze_optional", False),
     BoolOption("setting", "acousticbrainz_ng_save_raw", False),
-    BoolOption("setting", "acousticbrainz_ng_calculate_replaygain", True)
+    BoolOption("setting", "acousticbrainz_ng_calculate_replaygain", True),
+    BoolOption("setting", "acousticbrainz_ng_save_fingerprint", True)
 ]
 
 GAIA_KEY_ALGORITHMS = ["edma", "krumhansl", "temperley"]

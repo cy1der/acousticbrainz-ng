@@ -2,10 +2,12 @@ import os
 import json
 import subprocess
 import hashlib
+import zlib
+import struct
 import threading
 import concurrent.futures
 import tempfile
-import re
+
 from functools import partial
 from typing import List, Tuple, Dict, Optional
 
@@ -19,6 +21,10 @@ from picard.track import Track
 from picard.album import Album
 from picard.ui.options import OptionsPage, register_options_page
 from picard.util import thread
+from picard.coverart.image import (
+    CoverArtImage,
+    CoverArtImageError,
+)
 from PyQt5 import QtWidgets, QtCore
 
 _analysis_semaphore = None
@@ -377,6 +383,141 @@ class AcousticBrainzNG:
             if config.setting["acousticbrainz_ng_save_raw"]:
                 for i in range(len(output_data["predictions"]["mean"])):
                     metadata[f"ab:hi:{output}:{model_metadata['classes'][i].replace('non', 'not').replace('_', ' ').lower()}"] = output_data["predictions"]["mean"][i]
+
+        return True
+    
+    def save_fingerprint(self, metadata: Dict, file_path: str, file_obj) -> bool:
+        if not self._check_optional_models():
+            log.error("Optional models not found")
+            return False
+        
+        models_path = config.setting["acousticbrainz_ng_models_path"]
+        if not models_path:
+            log.error("Models path not configured")
+            return False
+
+        try:
+            output_path = self._generate_cache_folder(metadata, file_path)
+            if not output_path:
+                log.error("Failed to generate cache folder path")
+                return False
+        except Exception as e:
+            log.error(f"Error generating cache folder: {e}")
+            return False
+        
+        try:
+            output_path = self._generate_cache_folder(metadata, file_path)
+            if not output_path:
+                log.error("Failed to generate cache folder path")
+                return False
+        except Exception as e:
+            log.error(f"Error generating cache folder: {e}")
+            return False
+
+        fingerprint_data = []
+
+        for key, value in metadata.items():
+            if key.lower().startswith("ab:hi:"):
+                try:
+                    float_value = float(value)
+                    if 0 <= float_value <= 1:
+                        fingerprint_data.append(float_value)
+                except (ValueError, TypeError):
+                    continue
+
+        if not fingerprint_data:
+            log.error("No valid fingerprint data found in metadata")
+            return False
+        
+        if len(fingerprint_data) != 95:
+            log.error(f"Fingerprint expected exactly 95 values, got {len(fingerprint_data)}")
+            return False
+
+        fingerprint_file = os.path.join(output_path, "fingerprint.png")
+        
+        try:
+            try:
+                import numpy as _np
+            except Exception as e:
+                log.error(f"numpy is required to generate fingerprint PNG: {e}")
+                return False
+
+            def _checksum_floats(values, n=5):
+                arr = _np.clip(_np.asarray(values, dtype=float).flatten(), 0.0, 1.0)
+                b = (arr * 65535).astype(_np.uint16).tobytes()
+                buf = hashlib.sha256(b).digest()
+
+                while len(buf) < n * 4:
+                    buf += hashlib.sha256(buf).digest()
+
+                out = []
+
+                for i in range(n):
+                    start = i * 4
+                    u = struct.unpack(">I", buf[start:start+4])[0]
+                    out.append(u / 0xFFFFFFFF)
+
+                return _np.array(out, dtype=float)
+
+            def _to_grayscale_uint8(arr):
+                a = _np.clip(_np.asarray(arr, dtype=float), 0.0, 1.0)
+                return (255 - _np.round(a * 255)).astype(_np.uint8)
+
+            def _png_write_grayscale(path, img8):
+                if img8.ndim != 2 or img8.dtype != _np.uint8:
+                    raise ValueError("img8 must be a 2D numpy array of dtype uint8")
+                height, width = int(img8.shape[0]), int(img8.shape[1])
+
+                def _chunk(c_type, data):
+                    chunk = struct.pack(">I", len(data)) + c_type + data
+                    crc = zlib.crc32(c_type + data) & 0xFFFFFFFF
+                    return chunk + struct.pack(">I", crc)
+
+                png_sig = b'\x89PNG\r\n\x1a\n'
+                ihdr = struct.pack(">IIBBBBB",
+                                   width, height,
+                                   8,    # bit depth
+                                   0,    # color type = 0 (grayscale)
+                                   0,    # compression
+                                   0,    # filter
+                                   0)    # interlace
+                raw = bytearray()
+                for y in range(height):
+                    raw.append(0)
+                    raw.extend(img8[y].tobytes())
+                comp = zlib.compress(bytes(raw), level=9)
+
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(png_sig)
+                    f.write(_chunk(b'IHDR', ihdr))
+                    f.write(_chunk(b'IDAT', comp))
+                    f.write(_chunk(b'IEND', b''))
+
+            v = _np.clip(_np.asarray(fingerprint_data, dtype=float).flatten(), 0.0, 1.0)
+            base = _np.zeros(100, dtype=float)
+            base[:95] = v
+            base[95:] = _checksum_floats(v, n=5)
+            base = base.reshape((10, 10))
+
+            img8 = _to_grayscale_uint8(base)
+
+            _png_write_grayscale(fingerprint_file, img8)
+            
+            fingerprint_url = f"file://{fingerprint_file.replace(os.sep, '/')}"
+            
+            with open(fingerprint_file, "rb") as f:
+                fingerprint_data_bytes = f.read()
+            
+            cover_art_image = CoverArtImage(url=fingerprint_url, data=fingerprint_data_bytes, comment=f"{PLUGIN_NAME} fingerprint", types=['other'], support_types=True)
+
+            file_obj.metadata.images.append(cover_art_image)
+
+            file_obj.metadata_images_changed.emit()
+
+        except Exception as e:
+            log.error(f"Failed to create fingerprint PNG: {e}")
+            return False
 
         return True
 
@@ -891,6 +1032,15 @@ def analyze_track(track: Track, album: Optional[Album] = None) -> Dict:
                         log.error(error_msg)
                         results['errors'].append(error_msg)
 
+                if config.setting["acousticbrainz_ng_save_fingerprint"]:
+                    sf_result = acousticbrainz_ng.save_fingerprint(file.metadata, file.filename, file)
+                    if not sf_result:
+                        error_msg = f"Failed to save fingerprint for {file.filename}"
+                        log.error(error_msg)
+                        results['errors'].append(error_msg)
+                    else:
+                        file.metadata_images_changed.emit()
+
                 results['files_processed'] += 1
 
             except Exception as e:
@@ -1037,14 +1187,19 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         options_layout = QtWidgets.QVBoxLayout(options_group)
 
         self.analyze_optional_checkbox = QtWidgets.QCheckBox("Analyze optional MusicNN models", self)
-        self.analyze_optional_checkbox.setToolTip("Include optional MusicNN models in the analysis, currently unused unless raw values is enabled")
+        self.analyze_optional_checkbox.setToolTip("Include optional MusicNN models in the analysis")
 
         self.save_raw_checkbox = QtWidgets.QCheckBox("Save raw values", self)
         self.save_raw_checkbox.setToolTip("Save raw MusicNN numbers in the metadata")
         
         self.calculate_replaygain_checkbox = QtWidgets.QCheckBox("Calculate ReplayGain", self)
         self.calculate_replaygain_checkbox.setToolTip("Calculate ReplayGain values for the track and album")
-        
+
+        self.save_fingerprint_checkbox = QtWidgets.QCheckBox("Save fingerprint image", self)
+        self.save_fingerprint_checkbox.setToolTip("Save MusicNN data as an image, requires optional MusicNN values")
+
+        self.analyze_optional_checkbox.toggled.connect(self._update_fingerprint_state)
+
         musicnn_workers_layout = QtWidgets.QHBoxLayout()
         concurrent_analyses_layout = QtWidgets.QHBoxLayout()
         rg_reference_layout = QtWidgets.QHBoxLayout()
@@ -1086,6 +1241,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         options_layout.addWidget(self.analyze_optional_checkbox)
         options_layout.addWidget(self.save_raw_checkbox)
+        options_layout.addWidget(self.save_fingerprint_checkbox)
         options_layout.addWidget(self.calculate_replaygain_checkbox)
         options_layout.addLayout(concurrent_analyses_layout)
         options_layout.addLayout(musicnn_workers_layout)
@@ -1168,6 +1324,11 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         layout.addWidget(paths_group)
         
         layout.addStretch()
+
+    def _update_fingerprint_state(self, checked):
+        if not checked:
+            self.save_fingerprint_checkbox.setChecked(False)
+        self.save_fingerprint_checkbox.setEnabled(checked)
 
     def _check_binaries(self, show_success=False) -> bool:
         binaries_path = self.binaries_path_input.text()
@@ -1276,7 +1437,17 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             self.calculate_replaygain_checkbox.setChecked(replaygain_setting)
         
         self.rg_reference_input.setEnabled(self.calculate_replaygain_checkbox.isChecked())
+
+        fingerprint_setting = config.setting["acousticbrainz_ng_save_fingerprint"]
+        optional_setting = config.setting["acousticbrainz_ng_analyze_optional"] or False
         
+        if fingerprint_setting is None:
+            self.save_fingerprint_checkbox.setChecked(True if optional_setting else False)
+        else:
+            self.save_fingerprint_checkbox.setChecked(fingerprint_setting if optional_setting else False)
+        
+        self._update_fingerprint_state(optional_setting)
+
         self.musicnn_workers_input.setValue(config.setting["acousticbrainz_ng_max_musicnn_workers"] or 4)
         self.concurrent_analyses_input.setValue(config.setting["acousticbrainz_ng_max_concurrent_analyses"] or 2)
         self.rg_reference_input.setValue(config.setting["acousticbrainz_ng_replaygain_reference_loudness"] or -18)
@@ -1293,6 +1464,11 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         config.setting["acousticbrainz_ng_analyze_optional"] = self.analyze_optional_checkbox.isChecked()
         config.setting["acousticbrainz_ng_save_raw"] = self.save_raw_checkbox.isChecked()
         config.setting["acousticbrainz_ng_calculate_replaygain"] = self.calculate_replaygain_checkbox.isChecked()
+        
+        if self.analyze_optional_checkbox.isChecked():
+            config.setting["acousticbrainz_ng_save_fingerprint"] = self.save_fingerprint_checkbox.isChecked()
+        else:
+            config.setting["acousticbrainz_ng_save_fingerprint"] = False
 
         max_workers = max(1, min(self.musicnn_workers_input.value(), max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))))
         config.setting["acousticbrainz_ng_max_musicnn_workers"] = max_workers
