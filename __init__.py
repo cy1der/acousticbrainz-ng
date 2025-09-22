@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import subprocess
 import hashlib
 import zlib
@@ -1054,7 +1055,7 @@ def analyze_track(track: Track, album: Optional[Album] = None) -> Dict:
     return results
 
 class AcousticBrainzNGAction(BaseAction):
-    NAME = f"Analyze with {PLUGIN_NAME}"
+    NAME = f"[{PLUGIN_NAME}] Analyze"
     
     def __init__(self):
         super().__init__()
@@ -1152,6 +1153,62 @@ class AcousticBrainzNGAction(BaseAction):
                 partial(analyze_track, track, album),
                 self._analysis_callback
             )
+
+class AcousticBrainzNGDeleteCacheAction(BaseAction):
+    NAME = f"[{PLUGIN_NAME}] Delete cache"
+    
+    def __init__(self):
+        super().__init__()
+    
+    def callback(self, objs):
+        tracks_and_albums = [t for t in objs if isinstance(t, Track) or isinstance(t, Album)]
+        
+        if not tracks_and_albums:
+            return
+        
+        total_files = 0
+        tracks_to_process = []
+        
+        for item in tracks_and_albums:
+            if isinstance(item, Track):
+                total_files += len(item.files)
+                tracks_to_process.append((item, None))
+            elif isinstance(item, Album):
+                for track in item.tracks:
+                    total_files += len(track.files)
+                    tracks_to_process.append((track, item))
+        
+        if not tracks_to_process:
+            return
+
+        num_tracks = len(tracks_to_process)
+        current = 0
+        
+        if num_tracks == 1:
+            track, album = tracks_to_process[0]
+            track_name = track.metadata.get('title', 'Unknown Track')
+            self.tagger.window.set_statusbar_message('Deleting %s cache for "%s"...', PLUGIN_NAME, track_name) # pyright: ignore[reportAttributeAccessIssue]
+        else:
+            self.tagger.window.set_statusbar_message('Deleting %s cache for %i tracks...', PLUGIN_NAME, num_tracks) # pyright: ignore[reportAttributeAccessIssue]
+        
+        log.debug(f"Deleting {PLUGIN_NAME} cache for {total_files} files from {num_tracks} tracks")
+        
+        for track, album in tracks_to_process:
+            current += 1
+            progress = f" ({current}/{num_tracks})" if num_tracks > 1 else ""
+            for file in track.files:
+                try:
+                    cache_folder = acousticbrainz_ng._generate_cache_folder(file.metadata, file.filename)
+                    if os.path.exists(cache_folder):
+                        shutil.rmtree(cache_folder)
+                        log.debug(f"Deleted cache folder: {cache_folder}")
+                except Exception as e:
+                    log.error(f"Error deleting cache for {file.filename}: {e}")
+            track.update()
+            if album:
+                album.update()
+            track_name = track.metadata.get('title', 'Unknown Track')
+            self.tagger.window.set_statusbar_message('Deleted %s cache for "%s"%s.', PLUGIN_NAME, track_name, progress) # pyright: ignore[reportAttributeAccessIssue]
 
 class AcousticBrainzNGOptionsPage(OptionsPage):
     NAME = "acousticbrainz_ng"
@@ -1261,7 +1318,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             concurrent_analyses = self.concurrent_analyses_input.value()
             musicnn_workers = self.musicnn_workers_input.value()
             max_processes = concurrent_analyses + (concurrent_analyses * musicnn_workers)
-            breakdown = f"[{concurrent_analyses} gaia processes + ({concurrent_analyses} × {musicnn_workers}) MusicNN processes]"
+            breakdown = f"[{concurrent_analyses} gaia processes + ({concurrent_analyses} x {musicnn_workers}) MusicNN processes]"
             self.concurrent_processes_display.setText(f"{breakdown} = <span style='font-weight: bold;'>{max_processes}</span>")
 
         self.concurrent_analyses_input.valueChanged.connect(update_concurrent_processes)
@@ -1487,3 +1544,5 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 register_options_page(AcousticBrainzNGOptionsPage)
 register_track_action(AcousticBrainzNGAction())
 register_album_action(AcousticBrainzNGAction())
+register_track_action(AcousticBrainzNGDeleteCacheAction())
+register_album_action(AcousticBrainzNGDeleteCacheAction())
