@@ -152,22 +152,67 @@ class AcousticBrainzNG:
             nonlocal gaia_success
             if os.path.exists(os.path.join(output_path, "gaia.json")):
                 return
+            
+            jq_path = config.setting["acousticbrainz_ng_jq_path"]
+            if not jq_path or not os.path.exists(jq_path):
+                log.error("jq binary path not configured or invalid")
+                gaia_success = False
+                return
 
-            result = subprocess.run(
-                [gaia_binary_path, file, os.path.join(output_path, "gaia.json")],
+            gaia_proc = subprocess.run(
+                [gaia_binary_path, file, "-"],
                 capture_output=True,
                 text=True,
                 env=ENV,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
-            if result.returncode != 0:
+            if gaia_proc.returncode != 0:
                 gaia_success = False
-                log.error(f"Gaia binary {gaia_binary_path} failed on file {file} with exit code {result.returncode}")
-                if result.stdout:
-                    log.error(f"Gaia stdout: {result.stdout}")
-                if result.stderr:
-                    log.error(f"Gaia stderr: {result.stderr}")
+                log.error(f"Gaia binary {gaia_binary_path} failed on file {file} with exit code {gaia_proc.returncode}")
+                if gaia_proc.stdout:
+                    log.error(f"Gaia stdout: {gaia_proc.stdout}")
+                if gaia_proc.stderr:
+                    log.error(f"Gaia stderr: {gaia_proc.stderr}")
+                return
+
+            jq_filter = (
+                "{ rhythm: { bpm: .rhythm.bpm }, "
+                "tonal: { "
+                "chords_changes_rate: .tonal.chords_changes_rate, "
+                "chords_key: .tonal.chords_key, "
+                "chords_scale: .tonal.chords_scale, "
+                "key_temperley: { key: .tonal.key_temperley.key, scale: .tonal.key_temperley.scale, strength: .tonal.key_temperley.strength }, "
+                "key_krumhansl: { key: .tonal.key_krumhansl.key, scale: .tonal.key_krumhansl.scale, strength: .tonal.key_krumhansl.strength }, "
+                "key_edma: { key: .tonal.key_edma.key, scale: .tonal.key_edma.scale, strength: .tonal.key_edma.strength } "
+                "} }"
+            )
+
+            jq_proc = subprocess.run(
+                [jq_path, jq_filter],
+                input=gaia_proc.stdout,
+                capture_output=True,
+                text=True,
+                env=ENV,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+
+            if jq_proc.returncode != 0:
+                gaia_success = False
+                log.error(f"jq failed to post-process Gaia JSON with exit code {jq_proc.returncode}")
+                if jq_proc.stdout:
+                    log.error(f"jq stdout: {jq_proc.stdout}")
+                if jq_proc.stderr:
+                    log.error(f"jq stderr: {jq_proc.stderr}")
+                return
+
+            try:
+                os.makedirs(output_path, exist_ok=True)
+                with open(os.path.join(output_path, "gaia.json"), "w", encoding="utf-8") as f:
+                    f.write(jq_proc.stdout)
+            except Exception as e:
+                gaia_success = False
+                log.error(f"Failed to write processed Gaia JSON: {e}")
         
         gaia_thread = threading.Thread(target=run_gaia)
         gaia_thread.start()
@@ -1351,6 +1396,15 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             lambda: self._browse_file(self.ffmpeg_path_input),
             lambda: (self._check_binaries(show_success=True), None)[1]
         )
+        
+        # jq path
+        self.jq_path_input = QtWidgets.QLineEdit(self)
+        self.jq_path_input.setPlaceholderText("Path to jq")
+        jq_layout = self._create_path_input_layout(
+            self.jq_path_input,
+            lambda: self._browse_file(self.jq_path_input),
+            lambda: (self._check_binaries(show_success=True), None)[1]
+        )
 
         # Models path
         self.models_path_input = QtWidgets.QLineEdit(self)
@@ -1371,6 +1425,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         paths_layout.addWidget(QtWidgets.QLabel("FFmpeg", self))
         paths_layout.addLayout(ffmpeg_layout)
+        paths_layout.addWidget(QtWidgets.QLabel("jq", self))
+        paths_layout.addLayout(jq_layout)
         paths_layout.addWidget(QtWidgets.QLabel("Binaries", self))
         paths_layout.addLayout(binaries_layout)
         paths_layout.addWidget(QtWidgets.QLabel("Models", self))
@@ -1397,6 +1453,11 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         if not ffmpeg_path or not os.path.exists(ffmpeg_path):
             QtWidgets.QMessageBox.warning(self, "Binaries", "Invalid or empty FFmpeg path.")
             return False
+
+        jq_path = self.jq_path_input.text()
+        if not jq_path or not os.path.exists(jq_path):
+            QtWidgets.QMessageBox.warning(self, "Binaries", "Invalid or empty jq path.")
+            return False
         
         missing_binaries = []
         for binary in REQUIRED_BINARIES:
@@ -1419,6 +1480,20 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         except Exception as e:
             missing_binaries.append("FFmpeg (unable to execute)")
             log.error(f"Exception running FFmpeg version check: {e}")
+        
+        try:
+            result = subprocess.run([jq_path, "--version"], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            if result.returncode != 0 or not result.stdout.startswith("jq-"):
+                missing_binaries.append("jq (invalid executable)")
+                if result.returncode != 0:
+                    log.error(f"jq version check failed with exit code {result.returncode}")
+                    if result.stdout:
+                        log.error(f"jq stdout: {result.stdout}")
+                    if result.stderr:
+                        log.error(f"jq stderr: {result.stderr}")
+        except Exception as e:
+            missing_binaries.append("jq (unable to execute)")
+            log.error(f"Exception running jq version check: {e}")
         
         if missing_binaries:
             message = f"Missing binaries:\n" + "\n".join(f"• {binary}" for binary in missing_binaries)
@@ -1511,6 +1586,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         self.binaries_path_input.setText(config.setting["acousticbrainz_ng_binaries_path"])
         self.ffmpeg_path_input.setText(config.setting["acousticbrainz_ng_ffmpeg_path"])
+        self.jq_path_input.setText(config.setting["acousticbrainz_ng_jq_path"])
         self.models_path_input.setText(config.setting["acousticbrainz_ng_models_path"])
         self.cache_path_input.setText(config.setting["acousticbrainz_ng_cache_path"])
     
@@ -1538,6 +1614,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         config.setting["acousticbrainz_ng_binaries_path"] = self.binaries_path_input.text()
         config.setting["acousticbrainz_ng_ffmpeg_path"] = self.ffmpeg_path_input.text()
+        config.setting["acousticbrainz_ng_jq_path"] = self.jq_path_input.text()
         config.setting["acousticbrainz_ng_models_path"] = self.models_path_input.text()
         config.setting["acousticbrainz_ng_cache_path"] = self.cache_path_input.text()
 

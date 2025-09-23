@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ "$install_packages" = true ]; then
-    apt-get install -y git wget build-essential cmake libeigen3-dev libyaml-dev libfftw3-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libsamplerate0-dev libtag1-dev libchromaprint-dev vamp-plugin-sdk libyaml-cpp-dev
+    apt-get install -y git wget build-essential cmake libeigen3-dev libyaml-dev libfftw3-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libsamplerate0-dev libtag1-dev libchromaprint-dev vamp-plugin-sdk
 fi
 
 if [ "$install_tf_lib" = true ]; then
@@ -59,7 +59,7 @@ fi
 
 cd essentia || return 1
 git switch cmake
-sed -i 's@find_package(Yaml)@find_package(yaml-cpp REQUIRED)@' CMakeLists.txt
+sed -i 's/find_package(Yaml QUIET)/find_package(YAML QUIET)/' CMakeLists.txt
 cmake -B build -D BUILD_EXAMPLES=ON -D BUILD_TESTS="$([ "$test" = true ] && echo ON || echo OFF)" -D BUILD_PYTHON_BINDINGS=OFF -D BUILD_VAMP_PLUGIN=ON -D USE_TENSORFLOW=ON
 cmake --build build --config Release --parallel "$(nproc)"
 if [ "$test" = true ]; then

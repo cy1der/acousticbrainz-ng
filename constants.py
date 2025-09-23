@@ -18,7 +18,7 @@ External dependencies:
 </ul>
 <strong>This plugin is CPU heavy!</strong>
 """
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 PLUGIN_API_VERSIONS = ["2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0-or-later"
 PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
@@ -57,6 +57,7 @@ ENV['TF_ENABLE_ONEDNN_OPTS'] = "0"
 CONFIG_OPTIONS = [
     TextOption("setting", "acousticbrainz_ng_binaries_path", os.path.join(os.path.dirname(__file__), "bin")),
     TextOption("setting", "acousticbrainz_ng_ffmpeg_path", os.path.join(os.path.dirname(sys.executable), "ffmpeg" + (".exe" if os.name == "nt" else ""))),
+    TextOption("setting", "acousticbrainz_ng_jq_path", os.path.join(os.path.dirname(sys.executable), "jq" + (".exe" if os.name == "nt" else ""))),
     TextOption("setting", "acousticbrainz_ng_models_path", os.path.join(os.path.dirname(__file__), "models")),
     TextOption("setting", "acousticbrainz_ng_cache_path", os.path.join(os.path.dirname(__file__), "cache")),
     IntOption("setting", "acousticbrainz_ng_max_musicnn_workers", 4),
