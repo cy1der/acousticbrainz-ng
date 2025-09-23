@@ -57,7 +57,6 @@ ENV['TF_ENABLE_ONEDNN_OPTS'] = "0"
 CONFIG_OPTIONS = [
     TextOption("setting", "acousticbrainz_ng_binaries_path", os.path.join(os.path.dirname(__file__), "bin")),
     TextOption("setting", "acousticbrainz_ng_ffmpeg_path", os.path.join(os.path.dirname(sys.executable), "ffmpeg" + (".exe" if os.name == "nt" else ""))),
-    TextOption("setting", "acousticbrainz_ng_jq_path", os.path.join(os.path.dirname(sys.executable), "jq" + (".exe" if os.name == "nt" else ""))),
     TextOption("setting", "acousticbrainz_ng_models_path", os.path.join(os.path.dirname(__file__), "models")),
     TextOption("setting", "acousticbrainz_ng_cache_path", os.path.join(os.path.dirname(__file__), "cache")),
     IntOption("setting", "acousticbrainz_ng_max_musicnn_workers", 4),
