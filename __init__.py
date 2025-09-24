@@ -693,6 +693,7 @@ class AcousticBrainzNG:
                 return {}
             
             replaygain_log = replaygain_proc.stderr or replaygain_proc.stdout
+            replaygain_log = "\n".join((replaygain_log or "").splitlines()[-15:])
             
             replaygain_match = re.search(r'\{.*?\}', replaygain_log, re.S)
             replaygain_matches = re.findall(r'\{.*?\}', replaygain_log, re.S) if not replaygain_match else None
@@ -717,21 +718,25 @@ class AcousticBrainzNG:
             input_i = replaygain_lufs_result.get('input_i') if replaygain_lufs_result else None
             input_tp = replaygain_lufs_result.get('input_tp') if replaygain_lufs_result else None
             input_lra = replaygain_lufs_result.get('input_lra') if replaygain_lufs_result else None
+
+            input_i_val = None
+            input_tp_val = None
+            input_lra_val = None
             
             try:
-                if input_i:
+                if input_i is not None:
                     input_i_val = float(input_i)
             except (TypeError, ValueError):
                 input_i_val = None
 
             try:
-                if input_tp:
+                if input_tp is not None:
                     input_tp_val = float(input_tp)
             except (TypeError, ValueError):
                 input_tp_val = None
             
             try:
-                if input_lra:
+                if input_lra is not None:
                     input_lra_val = float(input_lra)
             except (TypeError, ValueError):
                 input_lra_val = None
@@ -769,6 +774,7 @@ class AcousticBrainzNG:
                 return result
 
             r128_log = r128_proc.stderr or r128_proc.stdout
+            r128_log = "\n".join((r128_log or "").splitlines()[-15:])
 
             r128_match = re.search(r'\{.*?\}', r128_log, re.S)
             r128_matches = re.findall(r'\{.*?\}', r128_log, re.S) if not r128_match else None
@@ -790,8 +796,9 @@ class AcousticBrainzNG:
 
             r128_input_i = r128_data.get('input_i') if r128_data else None
 
+            r128_input_i_val = None
             try:
-                if r128_input_i:
+                if r128_input_i is not None:
                     r128_input_i_val = int(r128_input_i)
             except (TypeError, ValueError):
                 r128_input_i_val = None
