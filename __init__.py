@@ -10,6 +10,7 @@ import threading
 import concurrent.futures
 import tempfile
 import math
+import yaml
 from functools import partial
 from typing import List, Tuple, Dict, Optional
 from picard import config, log
@@ -53,20 +54,23 @@ class AcousticBrainzNG:
             binary_path += '.exe'
         return binary_path
 
-    def _get_binary_paths(self) -> Tuple[str, str]:
+    def _get_binary_paths(self) -> Tuple[str, str, str]:
         binaries_path = config.setting["acousticbrainz_ng_binaries_path"]
         if not binaries_path:
             raise ValueError("Binaries path not configured")
             
         musicnn_binary_path = self._get_binary_path("streaming_musicnn_predict", binaries_path)
-        gaia_binary_path = self._get_binary_path("streaming_extractor_music", binaries_path)
-        
+        rhythm_binary_path = self._get_binary_path("streaming_rhythmextractor_multifeature", binaries_path)
+        key_binary_path = self._get_binary_path("streaming_key", binaries_path)
+
         if not os.path.exists(musicnn_binary_path):
             raise FileNotFoundError(f"Binary {musicnn_binary_path} not found")
-        if not os.path.exists(gaia_binary_path):
-            raise FileNotFoundError(f"Binary {gaia_binary_path} not found")
-            
-        return musicnn_binary_path, gaia_binary_path
+        if not os.path.exists(rhythm_binary_path):
+            raise FileNotFoundError(f"Binary {rhythm_binary_path} not found")
+        if not os.path.exists(key_binary_path):
+            raise FileNotFoundError(f"Binary {key_binary_path} not found")
+
+        return musicnn_binary_path, rhythm_binary_path, key_binary_path
 
     def _run_musicnn_models(self, models: List[Tuple[str, str]], musicnn_binary_path: str, file: str, output_path: str) -> bool:
         models_path = config.setting["acousticbrainz_ng_models_path"]
@@ -130,7 +134,7 @@ class AcousticBrainzNG:
             return False
         
         try:
-            musicnn_binary_path, gaia_binary_path = self._get_binary_paths()
+            musicnn_binary_path, rhythm_binary_path, key_binary_path = self._get_binary_paths()
         except (ValueError, FileNotFoundError) as e:
             log.error(str(e))
             return False
@@ -144,36 +148,86 @@ class AcousticBrainzNG:
             log.error(f"Error generating cache folder: {e}")
             return False
 
-        gaia_success = True
-        def run_gaia():
-            nonlocal gaia_success
-            if os.path.exists(os.path.join(output_path, "gaia.json")):
+        rhythm_success = True
+        def run_rhythm():
+            nonlocal rhythm_success
+            if os.path.exists(os.path.join(output_path, "rhythm.yaml")):
                 return
 
-            gaia_proc = subprocess.run(
-                [gaia_binary_path, file, os.path.join(output_path, "gaia.json")],
+            rhythm_proc = subprocess.run(
+                [rhythm_binary_path, file],
                 capture_output=True,
                 text=True,
                 env=ENV,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
-            if gaia_proc.returncode != 0:
-                gaia_success = False
-                log.error(f"Gaia binary {gaia_binary_path} failed on file {file} with exit code {gaia_proc.returncode}")
-                if gaia_proc.stdout:
-                    log.error(f"Gaia stdout: {gaia_proc.stdout}")
-                if gaia_proc.stderr:
-                    log.error(f"Gaia stderr: {gaia_proc.stderr}")
+            if rhythm_proc.returncode != 0:
+                rhythm_success = False
+                log.error(f"Rhythm binary {rhythm_binary_path} failed on file {file} with exit code {rhythm_proc.returncode}")
+                if rhythm_proc.stdout:
+                    log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
+                if rhythm_proc.stderr:
+                    log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
+                return
+
+            try:
+                stdout = rhythm_proc.stdout or ""
+                lines = stdout.splitlines(keepends=True)
+                if not lines:
+                    raise ValueError("Rhythm binary produced no stdout")
+
+                yaml_lines = lines[-5:] if len(lines) >= 5 else lines
+                yaml_str = "".join(yaml_lines)
+                if not yaml_str.strip():
+                    raise ValueError("Empty YAML section extracted from rhythm binary output")
+
+                out_file = os.path.join(output_path, "rhythm.yaml")
+                with open(out_file, "w", encoding="utf-8") as f:
+                    f.write(yaml_str)
+            except Exception as e:
+                rhythm_success = False
+                log.error(f"Failed to extract/save rhythm.yaml from rhythm binary stdout: {e}")
+                if rhythm_proc.stdout:
+                    log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
+                if rhythm_proc.stderr:
+                    log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
                 return
         
-        gaia_thread = threading.Thread(target=run_gaia)
-        gaia_thread.start()
+        key_success = True
+        def run_key():
+            nonlocal key_success
+            if os.path.exists(os.path.join(output_path, "key.yaml")):
+                return
+
+            key_proc = subprocess.run(
+                [key_binary_path, file, os.path.join(output_path, "key.yaml")],
+                capture_output=True,
+                text=True,
+                env=ENV,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+
+            if key_proc.returncode != 0:
+                key_success = False
+                log.error(f"Key binary {key_binary_path} failed on file {file} with exit code {key_proc.returncode}")
+                if key_proc.stdout:
+                    log.error(f"Key stdout: {key_proc.stdout}")
+                if key_proc.stderr:
+                    log.error(f"Key stderr: {key_proc.stderr}")
+                return
+
+        rhythm_thread = threading.Thread(target=run_rhythm)
+        rhythm_thread.start()
+
+        key_thread = threading.Thread(target=run_key)
+        key_thread.start()
 
         musicnn_success = self._run_musicnn_models(REQUIRED_MODELS, musicnn_binary_path, file, output_path)
-        gaia_thread.join()
-        
-        return gaia_success and musicnn_success
+        rhythm_thread.join()
+        key_thread.join()
+
+        return rhythm_success and key_success and musicnn_success
 
     def analyze_optional(self, metadata: Dict, file: str) -> bool:        
         if not self._check_binaries():
@@ -185,7 +239,7 @@ class AcousticBrainzNG:
             return False
         
         try:
-            musicnn_binary_path, _ = self._get_binary_paths()
+            musicnn_binary_path = self._get_binary_paths()[0]
         except (ValueError, FileNotFoundError) as e:
             log.error(str(e))
             return False
@@ -282,50 +336,48 @@ class AcousticBrainzNG:
         metadata['mood'] = moods
         metadata['tags'] = tags
         
-        gaia_data = {}
-        gaia_json_path = os.path.join(output_path, "gaia.json")
+        rhythm_data = {}
+        rhythm_yaml_path = os.path.join(output_path, "rhythm.yaml")
 
-        if os.path.exists(gaia_json_path):
-            try:
-                with open(gaia_json_path, 'r', encoding='utf-8') as f:
-                    gaia_data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                log.error(f"Error reading Gaia JSON file: {e}")
+        key_data = {}
+        key_yaml_path = os.path.join(output_path, "key.yaml")
+
+        if os.path.exists(rhythm_yaml_path):
+            with open(rhythm_yaml_path, 'r', encoding='utf-8') as f:
+                loaded = yaml.safe_load(f)
+
+            if not isinstance(loaded, dict):
+                log.error("Invalid rhythm YAML format: expected a mapping at the top level")
                 return False
+
+            rhythm_data = loaded
         else:
-            log.error(f"Gaia JSON file not found: {gaia_json_path}")
+            log.error(f"Rhythm YAML file not found: {rhythm_yaml_path}")
+            return False
+
+        if os.path.exists(key_yaml_path):
+            with open(key_yaml_path, 'r', encoding='utf-8') as f:
+                loaded = yaml.safe_load(f)
+            if not isinstance(loaded, dict):
+                log.error("Invalid key YAML format: expected a mapping at the top level")
+                return False
+
+            key_data = loaded
+        else:
+            log.error(f"Key YAML file not found: {key_yaml_path}")
             return False
 
         try:
-            metadata["bpm"] = int(round(gaia_data["rhythm"]["bpm"]))
-            
+            metadata["bpm"] = int(round(rhythm_data["bpm"]))
+            metadata["key"] = "o" if key_data["tonal"]["key_scale"] == "off" else f"{key_data['tonal']['key']}{'m' if key_data['tonal']['key_scale'] == 'minor' else ''}"
+
             if config.setting["acousticbrainz_ng_save_raw"]:
-                metadata["ab:lo:tonal:chords_changes_rate"] = gaia_data["tonal"]["chords_changes_rate"]
-                metadata["ab:lo:tonal:chords_key"] = gaia_data["tonal"]["chords_key"]
-                metadata["ab:lo:tonal:chords_scale"] = gaia_data["tonal"]["chords_scale"]
-            
-            highestStrength = -1
-            selectedAlgorithm = None
-            
-            for algorithm in GAIA_KEY_ALGORITHMS:
-                key_data = gaia_data["tonal"][f"key_{algorithm}"]
-
-                if key_data["strength"] > highestStrength:
-                    highestStrength = key_data["strength"]
-                    selectedAlgorithm = algorithm
-            
-            if selectedAlgorithm:
-                selected_key_data = gaia_data["tonal"][f"key_{selectedAlgorithm}"]
-
-                metadata["key"] = "o" if selected_key_data["scale"] == "off" else f"{selected_key_data['key']}{'m' if selected_key_data['scale'] == 'minor' else ''}"
-
-                if config.setting["acousticbrainz_ng_save_raw"]:
-                    metadata["ab:lo:tonal:key_scale"] = selected_key_data["scale"]
-                    metadata["ab:lo:tonal:key_key"] = selected_key_data["key"]
+                metadata["ab:lo:tonal:key_scale"] = key_data["tonal"]["key_scale"]
+                metadata["ab:lo:tonal:key_key"] = key_data["tonal"]["key"]
             
             return True
         except Exception as e:
-            log.error(f"Error processing gaia data: {e}")
+            log.error(f"Error processing feature data: {e}")
             return False
     
     def parse_optional(self, metadata: Dict, file: str) -> bool:
@@ -1395,8 +1447,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         def update_concurrent_processes():
             concurrent_analyses = self.concurrent_analyses_input.value()
             musicnn_workers = self.musicnn_workers_input.value()
-            max_processes = concurrent_analyses + (concurrent_analyses * musicnn_workers)
-            breakdown = f"[{concurrent_analyses} gaia processes + ({concurrent_analyses} x {musicnn_workers}) MusicNN processes]"
+            max_processes = (2 * concurrent_analyses) + (concurrent_analyses * musicnn_workers)
+            breakdown = f"[(2 x {concurrent_analyses}) feature processes + ({concurrent_analyses} x {musicnn_workers}) MusicNN processes]"
             self.concurrent_processes_display.setText(f"{breakdown} = <span style='font-weight: bold;'>{max_processes}</span>")
 
         self.concurrent_analyses_input.valueChanged.connect(update_concurrent_processes)

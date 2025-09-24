@@ -18,7 +18,7 @@ External dependencies:
 </ul>
 <strong>This plugin is CPU heavy!</strong>
 """
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.1.2"
 PLUGIN_API_VERSIONS = ["2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0-or-later"
 PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
@@ -46,8 +46,9 @@ OPTIONAL_MODELS: List[Tuple[str, str]] = [
 ]
 
 REQUIRED_BINARIES: List[str] = [
-    "streaming_extractor_music",
+    "streaming_rhythmextractor_multifeature",
     "streaming_musicnn_predict",
+    "streaming_key",
     "streaming_md5",
 ]
 
@@ -67,5 +68,3 @@ CONFIG_OPTIONS = [
     BoolOption("setting", "acousticbrainz_ng_calculate_replaygain", True),
     BoolOption("setting", "acousticbrainz_ng_save_fingerprint", True)
 ]
-
-GAIA_KEY_ALGORITHMS = ["edma", "krumhansl", "temperley"]
