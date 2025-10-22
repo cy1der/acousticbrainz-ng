@@ -1,0 +1,115 @@
+Below is a list of all the tags this plugin generates:
+
+bpm
+key
+mood
+tags
+ab:hi:danceability:danceable
+ab:hi:danceability:not danceable
+ab:hi:gender:female
+ab:hi:gender:male
+ab:hi:genre_electronic:ambient
+ab:hi:genre_electronic:drum and bass
+ab:hi:genre_electronic:house
+ab:hi:genre_electronic:techno
+ab:hi:genre_electronic:trance
+ab:hi:genre_rosamerica:classical
+ab:hi:genre_rosamerica:dance
+ab:hi:genre_rosamerica:hiphop
+ab:hi:genre_rosamerica:jazz
+ab:hi:genre_rosamerica:pop
+ab:hi:genre_rosamerica:rhythm and blues
+ab:hi:genre_rosamerica:rock
+ab:hi:genre_rosamerica:speech
+ab:hi:genre_tzanetakis:blues
+ab:hi:genre_tzanetakis:classical
+ab:hi:genre_tzanetakis:country
+ab:hi:genre_tzanetakis:disco
+ab:hi:genre_tzanetakis:hiphop
+ab:hi:genre_tzanetakis:jazz
+ab:hi:genre_tzanetakis:metal
+ab:hi:genre_tzanetakis:pop
+ab:hi:genre_tzanetakis:reggae
+ab:hi:genre_tzanetakis:rock
+ab:hi:mood_acoustic:acoustic
+ab:hi:mood_acoustic:not acoustic
+ab:hi:mood_aggressive:aggressive
+ab:hi:mood_aggressive:not aggressive
+ab:hi:mood_electronic:electronic
+ab:hi:mood_electronic:not electronic
+ab:hi:mood_happy:happy
+ab:hi:mood_happy:not happy
+ab:hi:mood_party:party
+ab:hi:mood_party:not party
+ab:hi:mood_relaxed:relaxed
+ab:hi:mood_relaxed:not relaxed
+ab:hi:mood_sad:sad
+ab:hi:mood_sad:not sad
+ab:hi:msd:00s
+ab:hi:msd:60s
+ab:hi:msd:70s
+ab:hi:msd:80s
+ab:hi:msd:90s
+ab:hi:msd:acoustic
+ab:hi:msd:alternative
+ab:hi:msd:alternative rock
+ab:hi:msd:ambient
+ab:hi:msd:beautiful
+ab:hi:msd:blues
+ab:hi:msd:catchy
+ab:hi:msd:chill
+ab:hi:msd:chillout
+ab:hi:msd:classic rock
+ab:hi:msd:country
+ab:hi:msd:dance
+ab:hi:msd:easy listening
+ab:hi:msd:electro
+ab:hi:msd:electronic
+ab:hi:msd:electronica
+ab:hi:msd:experimental
+ab:hi:msd:female vocalist
+ab:hi:msd:female vocalists
+ab:hi:msd:folk
+ab:hi:msd:funk
+ab:hi:msd:guitar
+ab:hi:msd:happy
+ab:hi:msd:hard rock
+ab:hi:msd:heavy metal
+ab:hi:msd:hip-hop
+ab:hi:msd:house
+ab:hi:msd:indie
+ab:hi:msd:indie pop
+ab:hi:msd:indie rock
+ab:hi:msd:instrumental
+ab:hi:msd:jazz
+ab:hi:msd:male vocalists
+ab:hi:msd:mellow
+ab:hi:msd:metal
+ab:hi:msd:oldies
+ab:hi:msd:party
+ab:hi:msd:pop
+ab:hi:msd:progressive rock
+ab:hi:msd:punk
+ab:hi:msd:rnb
+ab:hi:msd:rock
+ab:hi:msd:sad
+ab:hi:msd:sexy
+ab:hi:msd:soul
+ab:hi:tonal_atonal:atonal
+ab:hi:tonal_atonal:tonal
+ab:hi:voice_instrumental:instrumental
+ab:hi:voice_instrumental:voice
+ab:lo:tonal:chords_changes_rate
+ab:lo:tonal:chords_key
+ab:lo:tonal:chords_scale
+ab:lo:tonal:key_key
+ab:lo:tonal:key_scale
+replaygain_track_gain
+replaygain_track_peak
+replaygain_track_range
+replaygain_album_gain
+replaygain_album_peak
+replaygain_album_range
+replaygain_reference_loudness
+r128_track_gain
+r128_album_gain

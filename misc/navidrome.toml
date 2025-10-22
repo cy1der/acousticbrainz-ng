@@ -1,0 +1,404 @@
+Tags.tags.Aliases = ["tags", "TXXX:tags"]
+Tags.tags.Type = "string"
+Tags.tags.Split = [";", "/", ","]
+Tags.tags.Album = false
+
+Tags.danceable.Aliases = ["ab:hi:danceability:danceable"]
+Tags.danceable.Type = "float"
+Tags.danceable.Album = false
+
+Tags.notdanceable.Aliases = ["ab:hi:danceability:not danceable"]
+Tags.notdanceable.Type = "float"
+Tags.notdanceable.Album = false
+
+Tags.female.Aliases = ["ab:hi:gender:female"]
+Tags.female.Type = "float"
+Tags.female.Album = false
+
+Tags.male.Aliases = ["ab:hi:gender:male"]
+Tags.male.Type = "float"
+Tags.male.Album = false
+
+Tags.ambient.Aliases = ["ab:hi:genre_electronic:ambient"]
+Tags.ambient.Type = "float"
+Tags.ambient.Album = false
+
+Tags.drumandbass.Aliases = ["ab:hi:genre_electronic:drum and bass"]
+Tags.drumandbass.Type = "float"
+Tags.drumandbass.Album = false
+
+Tags.house.Aliases = ["ab:hi:genre_electronic:house"]
+Tags.house.Type = "float"
+Tags.house.Album = false
+
+Tags.techno.Aliases = ["ab:hi:genre_electronic:techno"]
+Tags.techno.Type = "float"
+Tags.techno.Album = false
+
+Tags.trance.Aliases = ["ab:hi:genre_electronic:trance"]
+Tags.trance.Type = "float"
+Tags.trance.Album = false
+
+Tags.classical_rosamerica.Aliases = ["ab:hi:genre_rosamerica:classical"]
+Tags.classical_rosamerica.Type = "float"
+Tags.classical_rosamerica.Album = false
+
+Tags.dance.Aliases = ["ab:hi:genre_rosamerica:dance"]
+Tags.dance.Type = "float"
+Tags.dance.Album = false
+
+Tags.hiphop_rosamerica.Aliases = ["ab:hi:genre_rosamerica:hiphop"]
+Tags.hiphop_rosamerica.Type = "float"
+Tags.hiphop_rosamerica.Album = false
+
+Tags.jazz_rosamerica.Aliases = ["ab:hi:genre_rosamerica:jazz"]
+Tags.jazz_rosamerica.Type = "float"
+Tags.jazz_rosamerica.Album = false
+
+Tags.pop_rosamerica.Aliases = ["ab:hi:genre_rosamerica:pop"]
+Tags.pop_rosamerica.Type = "float"
+Tags.pop_rosamerica.Album = false
+
+Tags.rhythmandblues.Aliases = ["ab:hi:genre_rosamerica:rhythm and blues"]
+Tags.rhythmandblues.Type = "float"
+Tags.rhythmandblues.Album = false
+
+Tags.rock_rosamerica.Aliases = ["ab:hi:genre_rosamerica:rock"]
+Tags.rock_rosamerica.Type = "float"
+Tags.rock_rosamerica.Album = false
+
+Tags.speech.Aliases = ["ab:hi:genre_rosamerica:speech"]
+Tags.speech.Type = "float"
+Tags.speech.Album = false
+
+Tags.blues.Aliases = ["ab:hi:genre_tzanetakis:blues"]
+Tags.blues.Type = "float"
+Tags.blues.Album = false
+
+Tags.classical_tzanetakis.Aliases = ["ab:hi:genre_tzanetakis:classical"]
+Tags.classical_tzanetakis.Type = "float"
+Tags.classical_tzanetakis.Album = false
+
+Tags.country.Aliases = ["ab:hi:genre_tzanetakis:country"]
+Tags.country.Type = "float"
+Tags.country.Album = false
+
+Tags.disco.Aliases = ["ab:hi:genre_tzanetakis:disco"]
+Tags.disco.Type = "float"
+Tags.disco.Album = false
+
+Tags.hiphop_tzanetakis.Aliases = ["ab:hi:genre_tzanetakis:hiphop"]
+Tags.hiphop_tzanetakis.Type = "float"
+Tags.hiphop_tzanetakis.Album = false
+
+Tags.jazz_tzanetakis.Aliases = ["ab:hi:genre_tzanetakis:jazz"]
+Tags.jazz_tzanetakis.Type = "float"
+Tags.jazz_tzanetakis.Album = false
+
+Tags.metal.Aliases = ["ab:hi:genre_tzanetakis:metal"]
+Tags.metal.Type = "float"
+Tags.metal.Album = false
+
+Tags.pop_tzanetakis.Aliases = ["ab:hi:genre_tzanetakis:pop"]
+Tags.pop_tzanetakis.Type = "float"
+Tags.pop_tzanetakis.Album = false
+
+Tags.reggae.Aliases = ["ab:hi:genre_tzanetakis:reggae"]
+Tags.reggae.Type = "float"
+Tags.reggae.Album = false
+
+Tags.rock_tzanetakis.Aliases = ["ab:hi:genre_tzanetakis:rock"]
+Tags.rock_tzanetakis.Type = "float"
+Tags.rock_tzanetakis.Album = false
+
+Tags.acoustic.Aliases = ["ab:hi:mood_acoustic:acoustic"]
+Tags.acoustic.Type = "float"
+Tags.acoustic.Album = false
+
+Tags.notacoustic.Aliases = ["ab:hi:mood_acoustic:not acoustic"]
+Tags.notacoustic.Type = "float"
+Tags.notacoustic.Album = false
+
+Tags.aggressive.Aliases = ["ab:hi:mood_aggressive:aggressive"]
+Tags.aggressive.Type = "float"
+Tags.aggressive.Album = false
+
+Tags.notaggressive.Aliases = ["ab:hi:mood_aggressive:not aggressive"]
+Tags.notaggressive.Type = "float"
+Tags.notaggressive.Album = false
+
+Tags.electronic.Aliases = ["ab:hi:mood_electronic:electronic"]
+Tags.electronic.Type = "float"
+Tags.electronic.Album = false
+
+Tags.notelectronic.Aliases = ["ab:hi:mood_electronic:not electronic"]
+Tags.notelectronic.Type = "float"
+Tags.notelectronic.Album = false
+
+Tags.happy.Aliases = ["ab:hi:mood_happy:happy"]
+Tags.happy.Type = "float"
+Tags.happy.Album = false
+
+Tags.nothappy.Aliases = ["ab:hi:mood_happy:not happy"]
+Tags.nothappy.Type = "float"
+Tags.nothappy.Album = false
+
+Tags.party.Aliases = ["ab:hi:mood_party:party"]
+Tags.party.Type = "float"
+Tags.party.Album = false
+
+Tags.notparty.Aliases = ["ab:hi:mood_party:not party"]
+Tags.notparty.Type = "float"
+Tags.notparty.Album = false
+
+Tags.relaxed.Aliases = ["ab:hi:mood_relaxed:relaxed"]
+Tags.relaxed.Type = "float"
+Tags.relaxed.Album = false
+
+Tags.notrelaxed.Aliases = ["ab:hi:mood_relaxed:not relaxed"]
+Tags.notrelaxed.Type = "float"
+Tags.notrelaxed.Album = false
+
+Tags.sad.Aliases = ["ab:hi:mood_sad:sad"]
+Tags.sad.Type = "float"
+Tags.sad.Album = false
+
+Tags.notsad.Aliases = ["ab:hi:mood_sad:not sad"]
+Tags.notsad.Type = "float"
+Tags.notsad.Album = false
+
+Tags.msd00s.Aliases = ["ab:hi:msd:00s"]
+Tags.msd00s.Type = "float"
+Tags.msd00s.Album = false
+
+Tags.msd60s.Aliases = ["ab:hi:msd:60s"]
+Tags.msd60s.Type = "float"
+Tags.msd60s.Album = false
+
+Tags.msd70s.Aliases = ["ab:hi:msd:70s"]
+Tags.msd70s.Type = "float"
+Tags.msd70s.Album = false
+
+Tags.msd80s.Aliases = ["ab:hi:msd:80s"]
+Tags.msd80s.Type = "float"
+Tags.msd80s.Album = false
+
+Tags.msd90s.Aliases = ["ab:hi:msd:90s"]
+Tags.msd90s.Type = "float"
+Tags.msd90s.Album = false
+
+Tags.msdacoustic.Aliases = ["ab:hi:msd:acoustic"]
+Tags.msdacoustic.Type = "float"
+Tags.msdacoustic.Album = false
+
+Tags.msdalternative.Aliases = ["ab:hi:msd:alternative"]
+Tags.msdalternative.Type = "float"
+Tags.msdalternative.Album = false
+
+Tags.msdalternativerock.Aliases = ["ab:hi:msd:alternative rock"]
+Tags.msdalternativerock.Type = "float"
+Tags.msdalternativerock.Album = false
+
+Tags.msdambient.Aliases = ["ab:hi:msd:ambient"]
+Tags.msdambient.Type = "float"
+Tags.msdambient.Album = false
+
+Tags.msdbeautiful.Aliases = ["ab:hi:msd:beautiful"]
+Tags.msdbeautiful.Type = "float"
+Tags.msdbeautiful.Album = false
+
+Tags.msdblues.Aliases = ["ab:hi:msd:blues"]
+Tags.msdblues.Type = "float"
+Tags.msdblues.Album = false
+
+Tags.msdcatchy.Aliases = ["ab:hi:msd:catchy"]
+Tags.msdcatchy.Type = "float"
+Tags.msdcatchy.Album = false
+
+Tags.msdchill.Aliases = ["ab:hi:msd:chill"]
+Tags.msdchill.Type = "float"
+Tags.msdchill.Album = false
+
+Tags.msdchillout.Aliases = ["ab:hi:msd:chillout"]
+Tags.msdchillout.Type = "float"
+Tags.msdchillout.Album = false
+
+Tags.msdclassicrock.Aliases = ["ab:hi:msd:classic rock"]
+Tags.msdclassicrock.Type = "float"
+Tags.msdclassicrock.Album = false
+
+Tags.msdcountry.Aliases = ["ab:hi:msd:country"]
+Tags.msdcountry.Type = "float"
+Tags.msdcountry.Album = false
+
+Tags.msddance.Aliases = ["ab:hi:msd:dance"]
+Tags.msddance.Type = "float"
+Tags.msddance.Album = false
+
+Tags.msdeasylistening.Aliases = ["ab:hi:msd:easy listening"]
+Tags.msdeasylistening.Type = "float"
+Tags.msdeasylistening.Album = false
+
+Tags.msdelectro.Aliases = ["ab:hi:msd:electro"]
+Tags.msdelectro.Type = "float"
+Tags.msdelectro.Album = false
+
+Tags.msdelectronic.Aliases = ["ab:hi:msd:electronic"]
+Tags.msdelectronic.Type = "float"
+Tags.msdelectronic.Album = false
+
+Tags.msdelectronica.Aliases = ["ab:hi:msd:electronica"]
+Tags.msdelectronica.Type = "float"
+Tags.msdelectronica.Album = false
+
+Tags.msdexperimental.Aliases = ["ab:hi:msd:experimental"]
+Tags.msdexperimental.Type = "float"
+Tags.msdexperimental.Album = false
+
+Tags.msdfemalevocalist.Aliases = ["ab:hi:msd:female vocalist"]
+Tags.msdfemalevocalist.Type = "float"
+Tags.msdfemalevocalist.Album = false
+
+Tags.msdfemalevocalists.Aliases = ["ab:hi:msd:female vocalists"]
+Tags.msdfemalevocalists.Type = "float"
+Tags.msdfemalevocalists.Album = false
+
+Tags.msdfolk.Aliases = ["ab:hi:msd:folk"]
+Tags.msdfolk.Type = "float"
+Tags.msdfolk.Album = false
+
+Tags.msdfunk.Aliases = ["ab:hi:msd:funk"]
+Tags.msdfunk.Type = "float"
+Tags.msdfunk.Album = false
+
+Tags.msdguitar.Aliases = ["ab:hi:msd:guitar"]
+Tags.msdguitar.Type = "float"
+Tags.msdguitar.Album = false
+
+Tags.msdhappy.Aliases = ["ab:hi:msd:happy"]
+Tags.msdhappy.Type = "float"
+Tags.msdhappy.Album = false
+
+Tags.msdhardrock.Aliases = ["ab:hi:msd:hard rock"]
+Tags.msdhardrock.Type = "float"
+Tags.msdhardrock.Album = false
+
+Tags.msdheavymetal.Aliases = ["ab:hi:msd:heavy metal"]
+Tags.msdheavymetal.Type = "float"
+Tags.msdheavymetal.Album = false
+
+Tags.msdhiphop.Aliases = ["ab:hi:msd:hip-hop"]
+Tags.msdhiphop.Type = "float"
+Tags.msdhiphop.Album = false
+
+Tags.msdhouse.Aliases = ["ab:hi:msd:house"]
+Tags.msdhouse.Type = "float"
+Tags.msdhouse.Album = false
+
+Tags.msdindie.Aliases = ["ab:hi:msd:indie"]
+Tags.msdindie.Type = "float"
+Tags.msdindie.Album = false
+
+Tags.msdindiepop.Aliases = ["ab:hi:msd:indie pop"]
+Tags.msdindiepop.Type = "float"
+Tags.msdindiepop.Album = false
+
+Tags.msdindierock.Aliases = ["ab:hi:msd:indie rock"]
+Tags.msdindierock.Type = "float"
+Tags.msdindierock.Album = false
+
+Tags.msdinstrumental.Aliases = ["ab:hi:msd:instrumental"]
+Tags.msdinstrumental.Type = "float"
+Tags.msdinstrumental.Album = false
+
+Tags.msdjazz.Aliases = ["ab:hi:msd:jazz"]
+Tags.msdjazz.Type = "float"
+Tags.msdjazz.Album = false
+
+Tags.msdmalevocalists.Aliases = ["ab:hi:msd:male vocalists"]
+Tags.msdmalevocalists.Type = "float"
+Tags.msdmalevocalists.Album = false
+
+Tags.msdmellow.Aliases = ["ab:hi:msd:mellow"]
+Tags.msdmellow.Type = "float"
+Tags.msdmellow.Album = false
+
+Tags.msdmetal.Aliases = ["ab:hi:msd:metal"]
+Tags.msdmetal.Type = "float"
+Tags.msdmetal.Album = false
+
+Tags.msdoldies.Aliases = ["ab:hi:msd:oldies"]
+Tags.msdoldies.Type = "float"
+Tags.msdoldies.Album = false
+
+Tags.msdparty.Aliases = ["ab:hi:msd:party"]
+Tags.msdparty.Type = "float"
+Tags.msdparty.Album = false
+
+Tags.msdpop.Aliases = ["ab:hi:msd:pop"]
+Tags.msdpop.Type = "float"
+Tags.msdpop.Album = false
+
+Tags.msdprogressiverock.Aliases = ["ab:hi:msd:progressive rock"]
+Tags.msdprogressiverock.Type = "float"
+Tags.msdprogressiverock.Album = false
+
+Tags.msdpunk.Aliases = ["ab:hi:msd:punk"]
+Tags.msdpunk.Type = "float"
+Tags.msdpunk.Album = false
+
+Tags.msdrnb.Aliases = ["ab:hi:msd:rnb"]
+Tags.msdrnb.Type = "float"
+Tags.msdrnb.Album = false
+
+Tags.msdrock.Aliases = ["ab:hi:msd:rock"]
+Tags.msdrock.Type = "float"
+Tags.msdrock.Album = false
+
+Tags.msdsad.Aliases = ["ab:hi:msd:sad"]
+Tags.msdsad.Type = "float"
+Tags.msdsad.Album = false
+
+Tags.msdsexy.Aliases = ["ab:hi:msd:sexy"]
+Tags.msdsexy.Type = "float"
+Tags.msdsexy.Album = false
+
+Tags.msdsoul.Aliases = ["ab:hi:msd:soul"]
+Tags.msdsoul.Type = "float"
+Tags.msdsoul.Album = false
+
+Tags.atonal.Aliases = ["ab:hi:tonal_atonal:atonal"]
+Tags.atonal.Type = "float"
+Tags.atonal.Album = false
+
+Tags.tonal.Aliases = ["ab:hi:tonal_atonal:tonal"]
+Tags.tonal.Type = "float"
+Tags.tonal.Album = false
+
+Tags.instrumental.Aliases = ["ab:hi:voice_instrumental:instrumental"]
+Tags.instrumental.Type = "float"
+Tags.instrumental.Album = false
+
+Tags.voice.Aliases = ["ab:hi:voice_instrumental:voice"]
+Tags.voice.Type = "float"
+Tags.voice.Album = false
+
+Tags.chordschangesrate.Aliases = ["ab:lo:tonal:chords_changes_rate"]
+Tags.chordschangesrate.Type = "float"
+Tags.chordschangesrate.Album = false
+
+Tags.chordskey.Aliases = ["ab:lo:tonal:chords_key"]
+Tags.chordskey.Type = "string"
+Tags.chordskey.Album = false
+
+Tags.chordscale.Aliases = ["ab:lo:tonal:chords_scale"]
+Tags.chordscale.Type = "string"
+Tags.chordscale.Album = false
+
+Tags.keykey.Aliases = ["ab:lo:tonal:key_key"]
+Tags.keykey.Type = "string"
+Tags.keykey.Album = false
+
+Tags.keyscale.Aliases = ["ab:lo:tonal:key_scale"]
+Tags.keyscale.Type = "string"
+Tags.keyscale.Album = false

@@ -835,7 +835,8 @@ class AcousticBrainzNG:
             
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as concat_file:
                 for audio_file in album_track_files:
-                    concat_file.write(f"file '{audio_file}'\n")
+                    escaped_file = audio_file.replace("'", "'\\''")
+                    concat_file.write(f"file '{escaped_file}'\n")
                 concat_file_path = concat_file.name
             
             try:
@@ -1658,11 +1659,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         config.setting["acousticbrainz_ng_analyze_optional"] = self.analyze_optional_checkbox.isChecked()
         config.setting["acousticbrainz_ng_save_raw"] = self.save_raw_checkbox.isChecked()
         config.setting["acousticbrainz_ng_calculate_replaygain"] = self.calculate_replaygain_checkbox.isChecked()
-        
-        if self.analyze_optional_checkbox.isChecked():
-            config.setting["acousticbrainz_ng_save_fingerprint"] = self.save_fingerprint_checkbox.isChecked()
-        else:
-            config.setting["acousticbrainz_ng_save_fingerprint"] = False
+        config.setting["acousticbrainz_ng_save_fingerprint"] = self.save_fingerprint_checkbox.isChecked()
 
         max_workers = max(1, min(self.musicnn_workers_input.value(), max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))))
         config.setting["acousticbrainz_ng_max_musicnn_workers"] = max_workers
