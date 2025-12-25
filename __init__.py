@@ -148,86 +148,92 @@ class AcousticBrainzNG:
             log.error(f"Error generating cache folder: {e}")
             return False
 
-        rhythm_success = True
-        def run_rhythm():
-            nonlocal rhythm_success
-            if os.path.exists(os.path.join(output_path, "rhythm.yaml")):
-                return
-
-            rhythm_proc = subprocess.run(
-                [rhythm_binary_path, file],
-                capture_output=True,
-                text=True,
-                env=ENV,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            
-            if rhythm_proc.returncode != 0:
-                rhythm_success = False
-                log.error(f"Rhythm binary {rhythm_binary_path} failed on file {file} with exit code {rhythm_proc.returncode}")
-                if rhythm_proc.stdout:
-                    log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
-                if rhythm_proc.stderr:
-                    log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
-                return
-
-            try:
-                stdout = rhythm_proc.stdout or ""
-                lines = stdout.splitlines(keepends=True)
-                if not lines:
-                    raise ValueError("Rhythm binary produced no stdout")
-
-                yaml_lines = lines[-5:] if len(lines) >= 5 else lines
-                yaml_str = "".join(yaml_lines)
-                if not yaml_str.strip():
-                    raise ValueError("Empty YAML section extracted from rhythm binary output")
-
-                out_file = os.path.join(output_path, "rhythm.yaml")
-                with open(out_file, "w", encoding="utf-8") as f:
-                    f.write(yaml_str)
-            except Exception as e:
-                rhythm_success = False
-                log.error(f"Failed to extract/save rhythm.yaml from rhythm binary stdout: {e}")
-                if rhythm_proc.stdout:
-                    log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
-                if rhythm_proc.stderr:
-                    log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
-                return
+        processing_file, temp_file = self._get_processing_file(file)
         
-        key_success = True
-        def run_key():
-            nonlocal key_success
-            if os.path.exists(os.path.join(output_path, "key.yaml")):
-                return
+        try:
+            rhythm_success = True
+            def run_rhythm():
+                nonlocal rhythm_success
+                if os.path.exists(os.path.join(output_path, "rhythm.yaml")):
+                    return
 
-            key_proc = subprocess.run(
-                [key_binary_path, file, os.path.join(output_path, "key.yaml")],
-                capture_output=True,
-                text=True,
-                env=ENV,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
+                rhythm_proc = subprocess.run(
+                    [rhythm_binary_path, processing_file],
+                    capture_output=True,
+                    text=True,
+                    env=ENV,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                )
+                
+                if rhythm_proc.returncode != 0:
+                    rhythm_success = False
+                    log.error(f"Rhythm binary {rhythm_binary_path} failed on file {processing_file} with exit code {rhythm_proc.returncode}")
+                    if rhythm_proc.stdout:
+                        log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
+                    if rhythm_proc.stderr:
+                        log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
+                    return
 
-            if key_proc.returncode != 0:
-                key_success = False
-                log.error(f"Key binary {key_binary_path} failed on file {file} with exit code {key_proc.returncode}")
-                if key_proc.stdout:
-                    log.error(f"Key stdout: {key_proc.stdout}")
-                if key_proc.stderr:
-                    log.error(f"Key stderr: {key_proc.stderr}")
-                return
+                try:
+                    stdout = rhythm_proc.stdout or ""
+                    lines = stdout.splitlines(keepends=True)
+                    if not lines:
+                        raise ValueError("Rhythm binary produced no stdout")
 
-        rhythm_thread = threading.Thread(target=run_rhythm)
-        rhythm_thread.start()
+                    yaml_lines = lines[-5:] if len(lines) >= 5 else lines
+                    yaml_str = "".join(yaml_lines)
+                    if not yaml_str.strip():
+                        raise ValueError("Empty YAML section extracted from rhythm binary output")
 
-        key_thread = threading.Thread(target=run_key)
-        key_thread.start()
+                    out_file = os.path.join(output_path, "rhythm.yaml")
+                    with open(out_file, "w", encoding="utf-8") as f:
+                        f.write(yaml_str)
+                except Exception as e:
+                    rhythm_success = False
+                    log.error(f"Failed to extract/save rhythm.yaml from rhythm binary stdout: {e}")
+                    if rhythm_proc.stdout:
+                        log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
+                    if rhythm_proc.stderr:
+                        log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
+                    return
+            
+            key_success = True
+            def run_key():
+                nonlocal key_success
+                if os.path.exists(os.path.join(output_path, "key.yaml")):
+                    return
 
-        musicnn_success = self._run_musicnn_models(REQUIRED_MODELS, musicnn_binary_path, file, output_path)
-        rhythm_thread.join()
-        key_thread.join()
+                key_proc = subprocess.run(
+                    [key_binary_path, processing_file, os.path.join(output_path, "key.yaml")],
+                    capture_output=True,
+                    text=True,
+                    env=ENV,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                )
 
-        return rhythm_success and key_success and musicnn_success
+                if key_proc.returncode != 0:
+                    key_success = False
+                    log.error(f"Key binary {key_binary_path} failed on file {processing_file} with exit code {key_proc.returncode}")
+                    if key_proc.stdout:
+                        log.error(f"Key stdout: {key_proc.stdout}")
+                    if key_proc.stderr:
+                        log.error(f"Key stderr: {key_proc.stderr}")
+                    return
+
+            rhythm_thread = threading.Thread(target=run_rhythm)
+            rhythm_thread.start()
+
+            key_thread = threading.Thread(target=run_key)
+            key_thread.start()
+
+            musicnn_success = self._run_musicnn_models(REQUIRED_MODELS, musicnn_binary_path, processing_file, output_path)
+            rhythm_thread.join()
+            key_thread.join()
+
+            return rhythm_success and key_success and musicnn_success
+        finally:
+            if temp_file:
+                self._cleanup_temp_file(temp_file)
 
     def analyze_optional(self, metadata: Dict, file: str) -> bool:        
         if not self._check_binaries():
@@ -253,7 +259,13 @@ class AcousticBrainzNG:
             log.error(f"Error generating cache folder: {e}")
             return False
 
-        return self._run_musicnn_models(OPTIONAL_MODELS, musicnn_binary_path, file, output_path)
+        processing_file, temp_file = self._get_processing_file(file)
+        
+        try:
+            return self._run_musicnn_models(OPTIONAL_MODELS, musicnn_binary_path, processing_file, output_path)
+        finally:
+            if temp_file:
+                self._cleanup_temp_file(temp_file)
     
     def parse_required(self, metadata: Dict, file: str) -> bool:
         if not self._check_required_models():
@@ -669,6 +681,133 @@ class AcousticBrainzNG:
 
     def _is_opus_file(self, file_path: str) -> bool:
         return file_path.lower().endswith('.opus')
+    
+    def _get_audio_channel_count(self, file_path: str) -> int:
+        try:
+            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
+            if not ffmpeg_path:
+                log.warning("FFmpeg path not configured, assuming stereo")
+                return 2
+            
+            ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe" + (".exe" if os.name == 'nt' else ""))
+            
+            if not os.path.exists(ffprobe_path):
+                probe_proc = subprocess.run(
+                    [ffmpeg_path, "-hide_banner", "-i", file_path],
+                    capture_output=True,
+                    text=True,
+                    env=ENV,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                )
+
+                output = probe_proc.stderr or ""
+
+                channel_match = re.search(r'(\d+)\s+channels?', output, re.IGNORECASE)
+                if channel_match:
+                    return int(channel_match.group(1))
+
+                if re.search(r'\b7\.1\b', output):
+                    return 8
+                elif re.search(r'\b5\.1\b', output):
+                    return 6
+                elif re.search(r'\bquad\b', output, re.IGNORECASE):
+                    return 4
+                elif re.search(r'\bstereo\b', output, re.IGNORECASE):
+                    return 2
+                elif re.search(r'\bmono\b', output, re.IGNORECASE):
+                    return 1
+
+                return 2
+            else:
+                probe_proc = subprocess.run(
+                    [ffprobe_path, "-v", "error", "-select_streams", "a:0", 
+                     "-show_entries", "stream=channels", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+                    capture_output=True,
+                    text=True,
+                    env=ENV,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                )
+                
+                if probe_proc.returncode == 0 and probe_proc.stdout.strip():
+                    try:
+                        return int(probe_proc.stdout.strip())
+                    except ValueError:
+                        pass
+                
+                return 2
+                
+        except Exception as e:
+            log.warning(f"Error detecting audio channels for {file_path}: {e}, assuming stereo")
+            return 2
+    
+    def _create_stereo_downmix(self, file_path: str) -> Optional[str]:
+        try:
+            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
+            if not ffmpeg_path:
+                log.error("FFmpeg path not configured, cannot downmix")
+                return None
+
+            file_ext = os.path.splitext(file_path)[1]
+            temp_dir = tempfile.mkdtemp(prefix="acousticbrainz_ng_")
+            temp_file = os.path.join(temp_dir, f"stereo_downmix{file_ext}")
+            
+            log.debug(f"Downmixing multichannel audio to stereo: {file_path} -> {temp_file}")
+
+            downmix_proc = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-i", file_path, "-ac", "2", "-y", temp_file],
+                capture_output=True,
+                text=True,
+                env=ENV,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            
+            if downmix_proc.returncode != 0:
+                log.error(f"FFmpeg downmix failed for {file_path} with exit code {downmix_proc.returncode}")
+                if downmix_proc.stderr:
+                    log.error(f"FFmpeg stderr: {downmix_proc.stderr}")
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
+                return None
+            
+            if os.path.exists(temp_file):
+                log.debug(f"Successfully created stereo downmix: {temp_file}")
+                return temp_file
+            else:
+                log.error(f"Stereo downmix file was not created: {temp_file}")
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
+                return None
+                
+        except Exception as e:
+            log.error(f"Error creating stereo downmix for {file_path}: {e}")
+            return None
+    
+    def _cleanup_temp_file(self, temp_file_path: str) -> None:
+        try:
+            if temp_file_path and os.path.exists(temp_file_path):
+                temp_dir = os.path.dirname(temp_file_path)
+                shutil.rmtree(temp_dir)
+                log.debug(f"Cleaned up temporary directory: {temp_dir}")
+        except Exception as e:
+            log.warning(f"Failed to clean up temporary file {temp_file_path}: {e}")
+    
+    def _get_processing_file(self, file_path: str) -> Tuple[str, Optional[str]]:
+        channels = self._get_audio_channel_count(file_path)
+        
+        if channels > 2:
+            log.info(f"File {file_path} has {channels} channels, creating stereo downmix for processing")
+            temp_file = self._create_stereo_downmix(file_path)
+            if temp_file:
+                return (temp_file, temp_file)
+            else:
+                log.warning(f"Failed to create stereo downmix for {file_path}, attempting to process original")
+                return (file_path, None)
+        
+        return (file_path, None)
     
     def calculate_track_loudness(self, file_path: str) -> Dict:
         try:
