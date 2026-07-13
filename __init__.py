@@ -603,7 +603,7 @@ class AcousticBrainzNG:
 
         cache_folder = os.path.join(
             str(cache_base),
-            str(release_artist_mbid),
+            str(release_artist_mbid) if len(str(release_artist_mbid).encode('utf-8')) <= 255 else hashlib.sha256(str(release_artist_mbid)),
             str(release_group_mbid),
             str(release_mbid),
             str(recording_mbid)
