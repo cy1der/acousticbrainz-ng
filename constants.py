@@ -1,28 +1,7 @@
 import os
-import sys
-from typing import List, Tuple
-from picard.config import BoolOption, TextOption, IntOption
+from typing import Dict, List, Tuple, Union
 
 PLUGIN_NAME = "AcousticBrainz-ng"
-PLUGIN_AUTHOR = "cy1der"
-PLUGIN_DESCRIPTION = """
-Analyze track acoustic characteristics using Essentia
-<br/>
-This plugin is not affiliated with the <a href='https://acousticbrainz.org'>AcousticBrainz</a> project<br/>
-This is not a 1:1 recreation of the AcousticBrainz schema, but will provide most of the meaningful data<br/>
-External dependencies:
-<ul>
-<li><a href='https://essentia.upf.edu'>Essentia</a> binaries compiled with TensorFlow and gaia2 support (included)</li>
-<li>A few MusicNN models (included)</li>
-<li><a href='https://ffmpeg.org'>FFmpeg</a></li>
-</ul>
-<strong>This plugin is CPU heavy!</strong>
-"""
-PLUGIN_VERSION = "1.1.5"
-PLUGIN_API_VERSIONS = ["2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
-PLUGIN_LICENSE = "GPL-2.0-or-later"
-PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
-PLUGIN_USER_GUIDE_URL = "https://github.com/cy1der/acousticbrainz-ng"
 
 REQUIRED_MODELS: List[Tuple[str, str]] = [
     ("msd-musicnn-1", "msd"),
@@ -52,19 +31,43 @@ REQUIRED_BINARIES: List[str] = [
     "streaming_md5",
 ]
 
+# Total number of MusicNN class probabilities across all models, i.e. the
+# number of values encoded into the fingerprint image
+FINGERPRINT_VALUES = 95
+
+MAX_MUSICNN_WORKERS = max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))
+MAX_CONCURRENT_ANALYSES = 8
+
 ENV = os.environ.copy()
 ENV['TF_ENABLE_ONEDNN_OPTS'] = "0"
 
-CONFIG_OPTIONS = [
-    TextOption("setting", "acousticbrainz_ng_binaries_path", os.path.join(os.path.dirname(__file__), "bin")),
-    TextOption("setting", "acousticbrainz_ng_ffmpeg_path", os.path.join(os.path.dirname(sys.executable), "ffmpeg" + (".exe" if os.name == "nt" else ""))),
-    TextOption("setting", "acousticbrainz_ng_models_path", os.path.join(os.path.dirname(__file__), "models")),
-    TextOption("setting", "acousticbrainz_ng_cache_path", os.path.join(os.path.dirname(__file__), "cache")),
-    IntOption("setting", "acousticbrainz_ng_max_musicnn_workers", 4),
-    IntOption("setting", "acousticbrainz_ng_max_concurrent_analyses", 2),
-    IntOption("setting", "acousticbrainz_ng_replaygain_reference_loudness", -18),
-    BoolOption("setting", "acousticbrainz_ng_analyze_optional", False),
-    BoolOption("setting", "acousticbrainz_ng_save_raw", False),
-    BoolOption("setting", "acousticbrainz_ng_calculate_replaygain", True),
-    BoolOption("setting", "acousticbrainz_ng_save_fingerprint", False)
+# Plugin options as (name, default, bounds). Empty paths mean "use the
+# bundled/auto-detected location", resolved at runtime so that the plugin
+# keeps working when its install directory changes
+PLUGIN_OPTIONS: List[Tuple[str, Union[str, int, bool], Union[Tuple[int, int], None]]] = [
+    ("binaries_path", "", None),
+    ("ffmpeg_path", "", None),
+    ("models_path", "", None),
+    ("cache_path", "", None),
+    ("max_musicnn_workers", 4, (1, MAX_MUSICNN_WORKERS)),
+    ("max_concurrent_analyses", 2, (1, MAX_CONCURRENT_ANALYSES)),
+    ("replaygain_reference_loudness", -18, (-30, -5)),
+    ("analyze_optional", False, None),
+    ("save_raw", False, None),
+    ("calculate_replaygain", True, None),
+    ("save_fingerprint", False, None),
 ]
+
+# Option names used by the Picard 2 version of this plugin, stored in the
+# global "setting" section, mapped to the new plugin-private option names
+LEGACY_OPTION_PREFIX = "acousticbrainz_ng_"
+LEGACY_OPTION_TYPES: Dict[str, type] = {
+    "ffmpeg_path": str,
+    "max_musicnn_workers": int,
+    "max_concurrent_analyses": int,
+    "replaygain_reference_loudness": int,
+    "analyze_optional": bool,
+    "save_raw": bool,
+    "calculate_replaygain": bool,
+    "save_fingerprint": bool,
+}

@@ -1,0 +1,27 @@
+uuid = "ba24f3db-fd81-4eba-83af-e329c099cb69"
+name = "AcousticBrainz-ng"
+description = "Analyze track acoustic characteristics (moods, BPM, key, tags, ReplayGain) using Essentia"
+long_description = """
+Analyze track acoustic characteristics using [Essentia](https://essentia.upf.edu).
+
+This plugin is not affiliated with the [AcousticBrainz](https://acousticbrainz.org) project.
+This is not a 1:1 recreation of the AcousticBrainz schema, but will provide most of the meaningful data.
+
+External dependencies:
+
+- Essentia binaries compiled with TensorFlow and gaia2 support (included, Linux x86-64)
+- A few MusicNN models (included)
+- [FFmpeg](https://ffmpeg.org)
+
+**This plugin is CPU heavy!**
+"""
+version = "2.0.0"
+api = ["3.0"]
+authors = ["cy1der"]
+maintainers = ["cy1der"]
+license = "GPL-2.0-or-later"
+license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
+homepage = "https://github.com/cy1der/acousticbrainz-ng"
+report_bugs_to = "https://github.com/cy1der/acousticbrainz-ng/issues"
+categories = ["metadata"]
+min_python_version = "3.10"

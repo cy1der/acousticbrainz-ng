@@ -11,54 +11,211 @@ import concurrent.futures
 import tempfile
 import math
 import yaml
+from dataclasses import dataclass, field
 from functools import partial
-from typing import List, Tuple, Dict, Optional
-from picard import config, log
-from picard.ui.itemviews import (
+from typing import Any, List, Tuple, Dict, Optional
+from picard.plugin3.api import (
+    Album,
     BaseAction,
-    register_track_action,
-    register_album_action,
+    CoverArtImage,
+    OptionsPage,
+    PluginApi,
+    Track,
 )
-from picard.track import Track
-from picard.album import Album
-from picard.ui.options import OptionsPage, register_options_page
 from picard.util import thread
-from picard.coverart.image import CoverArtImage
-from PyQt5 import QtWidgets, QtCore
-
-_analysis_semaphore = None
-_current_max_concurrent = 0
-
-def _get_analysis_semaphore():
-    global _analysis_semaphore, _current_max_concurrent
-    
-    max_concurrent = config.setting["acousticbrainz_ng_max_concurrent_analyses"] or 2
-    
-    if _analysis_semaphore is None or _current_max_concurrent != max_concurrent:
-        _analysis_semaphore = threading.Semaphore(max_concurrent)
-        _current_max_concurrent = max_concurrent
-        log.debug(f"Created analysis semaphore with limit: {max_concurrent}")
-    
-    return _analysis_semaphore
+from PyQt6 import QtWidgets, QtCore
 
 from .constants import *
 
+try:
+    from picard.const.appdirs import cache_folder as _picard_cache_folder
+except ImportError:
+    def _picard_cache_folder() -> str:
+        return QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.CacheLocation)
+
+FINGERPRINT_COMMENT = f"{PLUGIN_NAME} fingerprint"
+TRACK_LOUDNESS_FILE = "loudness.json"
+ALBUM_LOUDNESS_FILE = "album_loudness.json"
+
+
+def _exe(name: str) -> str:
+    return name + (".exe" if os.name == 'nt' else "")
+
+
+def _default_path(api: PluginApi, name: str) -> str:
+    if name == "binaries_path":
+        return str(api.plugin_dir / "bin")
+    if name == "models_path":
+        return str(api.plugin_dir / "models")
+    if name == "cache_path":
+        return os.path.join(_picard_cache_folder(), "acousticbrainz-ng")
+    if name == "ffmpeg_path":
+        return shutil.which("ffmpeg") or ""
+    raise KeyError(name)
+
+
+def _resolve_path(api: PluginApi, name: str, value: Optional[str] = None) -> str:
+    if value is None:
+        value = api.plugin_config[name]
+    return value or _default_path(api, name)
+
+
+class AnalysisCancelled(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Settings:
+    binaries_path: str
+    ffmpeg_path: str
+    models_path: str
+    cache_path: str
+    max_musicnn_workers: int
+    max_concurrent_analyses: int
+    replaygain_reference_loudness: int
+    analyze_optional: bool
+    save_raw: bool
+    calculate_replaygain: bool
+    save_fingerprint: bool
+
+
+@dataclass
+class AlbumJob:
+    files: List[str]
+    # Identifies the album's track list, used to invalidate the cached album
+    # loudness when tracks are added or removed
+    key: List[str]
+
+
+@dataclass
+class FileJob:
+    # Picard File object, only accessed on the main thread
+    file: Any
+    filename: str
+    metadata: Dict[str, str]
+
+
+@dataclass
+class FileResult:
+    file: Any
+    tags: Dict[str, Any] = field(default_factory=dict)
+    fingerprint: Optional[Tuple[bytes, str]] = None
+    errors: List[str] = field(default_factory=list)
+    processed: bool = False
+
+
+@dataclass
+class TrackResult:
+    files: List[FileResult]
+    cancelled: bool = False
+
+
+class ProcessingFile:
+    """Lazily provides a stereo version of an audio file for Essentia, only
+    probing and downmixing when an analysis actually needs to run"""
+
+    def __init__(self, plugin: "AcousticBrainzNG", settings: Settings, file_path: str):
+        self._plugin = plugin
+        self._settings = settings
+        self._file_path = file_path
+        self._processing_file: Optional[str] = None
+        self._temp_file: Optional[str] = None
+
+    def get(self) -> str:
+        if self._processing_file is None:
+            self._processing_file, self._temp_file = self._plugin._get_processing_file(self._settings, self._file_path)
+        return self._processing_file
+
+    def __enter__(self) -> "ProcessingFile":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._temp_file:
+            self._plugin._cleanup_temp_file(self._temp_file)
+
+
 class AcousticBrainzNG:
-    def __init__(self):
-        pass
+    def __init__(self, api: PluginApi):
+        self.api = api
+        self.log = api.logger
+        self.pool = QtCore.QThreadPool()
+        self.in_flight: set = set()
+        self._cancelled = threading.Event()
+        self._processes: set = set()
+        self._processes_lock = threading.Lock()
+        self._album_locks: Dict[str, threading.Lock] = {}
+        self._album_locks_lock = threading.Lock()
+
+    def settings(self) -> Settings:
+        cfg = self.api.plugin_config
+        return Settings(
+            binaries_path=_resolve_path(self.api, "binaries_path"),
+            ffmpeg_path=_resolve_path(self.api, "ffmpeg_path"),
+            models_path=_resolve_path(self.api, "models_path"),
+            cache_path=_resolve_path(self.api, "cache_path"),
+            max_musicnn_workers=cfg["max_musicnn_workers"],
+            max_concurrent_analyses=cfg["max_concurrent_analyses"],
+            replaygain_reference_loudness=cfg["replaygain_reference_loudness"],
+            analyze_optional=cfg["analyze_optional"],
+            save_raw=cfg["save_raw"],
+            calculate_replaygain=cfg["calculate_replaygain"],
+            save_fingerprint=cfg["analyze_optional"] and cfg["save_fingerprint"],
+        )
+
+    def shutdown(self) -> None:
+        self._cancelled.set()
+        self.pool.clear()
+        with self._processes_lock:
+            for proc in self._processes:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self.pool.waitForDone()
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled.is_set():
+            raise AnalysisCancelled()
+
+    def _run(self, args: List[str]) -> subprocess.CompletedProcess:
+        self._check_cancelled()
+        proc = subprocess.Popen(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=ENV,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        with self._processes_lock:
+            self._processes.add(proc)
+        try:
+            stdout, stderr = proc.communicate()
+        finally:
+            with self._processes_lock:
+                self._processes.discard(proc)
+        self._check_cancelled()
+        return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+    def _log_process_failure(self, description: str, proc: subprocess.CompletedProcess) -> None:
+        self.log.error(f"{description} with exit code {proc.returncode}")
+        if proc.stdout:
+            self.log.error(f"stdout: {proc.stdout}")
+        if proc.stderr:
+            self.log.error(f"stderr: {proc.stderr}")
 
     @staticmethod
     def _get_binary_path(binary_name: str, binaries_path: str) -> str:
-        binary_path = os.path.join(binaries_path, binary_name)
-        if os.name == 'nt':  # Windows
-            binary_path += '.exe'
-        return binary_path
+        return os.path.join(binaries_path, _exe(binary_name))
 
-    def _get_binary_paths(self) -> Tuple[str, str, str]:
-        binaries_path = config.setting["acousticbrainz_ng_binaries_path"]
+    def _get_binary_paths(self, settings: Settings) -> Tuple[str, str, str]:
+        binaries_path = settings.binaries_path
         if not binaries_path:
             raise ValueError("Binaries path not configured")
-            
+
         musicnn_binary_path = self._get_binary_path("streaming_musicnn_predict", binaries_path)
         rhythm_binary_path = self._get_binary_path("streaming_rhythmextractor_multifeature", binaries_path)
         key_binary_path = self._get_binary_path("streaming_key", binaries_path)
@@ -72,10 +229,14 @@ class AcousticBrainzNG:
 
         return musicnn_binary_path, rhythm_binary_path, key_binary_path
 
-    def _run_musicnn_models(self, models: List[Tuple[str, str]], musicnn_binary_path: str, file: str, output_path: str) -> bool:
-        models_path = config.setting["acousticbrainz_ng_models_path"]
+    @staticmethod
+    def _pending_models(models: List[Tuple[str, str]], output_path: str) -> List[Tuple[str, str]]:
+        return [model for model in models if not os.path.exists(os.path.join(output_path, f"{model[1]}.json"))]
+
+    def _run_musicnn_models(self, settings: Settings, models: List[Tuple[str, str]], musicnn_binary_path: str, file: str, output_path: str) -> bool:
+        models_path = settings.models_path
         if not models_path:
-            log.error("Models path not configured")
+            self.log.error("Models path not configured")
             return False
 
         success_results = {}
@@ -88,518 +249,327 @@ class AcousticBrainzNG:
                     raise FileNotFoundError(f"Model {model_name} not found at {model_path}")
 
                 output_file_path = os.path.join(output_path, f"{output_file}.json")
-                
+
                 if os.path.exists(output_file_path):
                     success_results[model_name] = True
                     return
-                
-                result = subprocess.run(
-                    [musicnn_binary_path, model_path, file, output_file_path],
-                    capture_output=True,
-                    text=True,
-                    env=ENV,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                )
-                
+
+                result = self._run([musicnn_binary_path, model_path, file, output_file_path])
+
                 if result.returncode != 0:
                     success_results[model_name] = False
-                    log.error(f"MusicNN binary {musicnn_binary_path} failed for model {model_name} on file {file} with exit code {result.returncode}")
-                    if result.stdout:
-                        log.error(f"MusicNN stdout: {result.stdout}")
-                    if result.stderr:
-                        log.error(f"MusicNN stderr: {result.stderr}")
+                    self._log_process_failure(f"MusicNN binary {musicnn_binary_path} failed for model {model_name} on file {file}", result)
                 else:
                     success_results[model_name] = True
+            except AnalysisCancelled:
+                success_results[model_name] = False
             except FileNotFoundError as e:
                 success_results[model_name] = False
-                log.error(f"Model {model_name} not found: {e}")
+                self.log.error(f"Model {model_name} not found: {e}")
             except Exception as e:
                 success_results[model_name] = False
-                log.error(f"Error processing model {model_name}: {e}")
+                self.log.error(f"Error processing model {model_name}: {e}")
 
-        max_workers = config.setting["acousticbrainz_ng_max_musicnn_workers"] or 4
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=settings.max_musicnn_workers) as executor:
             futures = [executor.submit(run_musicnn_model, model) for model in models]
             concurrent.futures.wait(futures)
-        
+        self._check_cancelled()
+
         return all(success_results.get(model[0], False) for model in models)
 
-    def analyze_required(self, metadata: Dict, file: str) -> bool:        
-        if not self._check_binaries():
-            log.error("Essentia binaries not found")
+    def analyze_required(self, settings: Settings, source: ProcessingFile, output_path: str) -> bool:
+        if not self._check_binaries(settings):
+            self.log.error("Essentia binaries not found")
             return False
 
-        if not self._check_required_models():
-            log.error("Required models not found")
+        if not self._check_required_models(settings):
+            self.log.error("Required models not found")
             return False
-        
+
         try:
-            musicnn_binary_path, rhythm_binary_path, key_binary_path = self._get_binary_paths()
+            musicnn_binary_path, rhythm_binary_path, key_binary_path = self._get_binary_paths(settings)
         except (ValueError, FileNotFoundError) as e:
-            log.error(str(e))
-            return False
-    
-        try:
-            output_path = self._generate_cache_folder(metadata, file)
-            if not output_path:
-                log.error("Failed to generate cache folder path")
-                return False
-        except Exception as e:
-            log.error(f"Error generating cache folder: {e}")
+            self.log.error(str(e))
             return False
 
-        processing_file, temp_file = self._get_processing_file(file)
-        
+        rhythm_yaml_path = os.path.join(output_path, "rhythm.yaml")
+        key_yaml_path = os.path.join(output_path, "key.yaml")
+        pending_models = self._pending_models(REQUIRED_MODELS, output_path)
+        need_rhythm = not os.path.exists(rhythm_yaml_path)
+        need_key = not os.path.exists(key_yaml_path)
+
+        if not (pending_models or need_rhythm or need_key):
+            return True
+
+        processing_file = source.get()
+
+        rhythm_success = True
+        def run_rhythm():
+            nonlocal rhythm_success
+            if not need_rhythm:
+                return
+
+            try:
+                rhythm_proc = self._run([rhythm_binary_path, processing_file])
+            except AnalysisCancelled:
+                rhythm_success = False
+                return
+
+            if rhythm_proc.returncode != 0:
+                rhythm_success = False
+                self._log_process_failure(f"Rhythm binary {rhythm_binary_path} failed on file {processing_file}", rhythm_proc)
+                return
+
+            try:
+                stdout = rhythm_proc.stdout or ""
+                lines = stdout.splitlines(keepends=True)
+                if not lines:
+                    raise ValueError("Rhythm binary produced no stdout")
+
+                yaml_lines = lines[-5:] if len(lines) >= 5 else lines
+                yaml_str = "".join(yaml_lines)
+                if not yaml_str.strip():
+                    raise ValueError("Empty YAML section extracted from rhythm binary output")
+
+                with open(rhythm_yaml_path, "w", encoding="utf-8") as f:
+                    f.write(yaml_str)
+            except Exception as e:
+                rhythm_success = False
+                self.log.error(f"Failed to extract/save rhythm.yaml from rhythm binary stdout: {e}")
+                if rhythm_proc.stdout:
+                    self.log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
+                if rhythm_proc.stderr:
+                    self.log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
+                return
+
+        key_success = True
+        def run_key():
+            nonlocal key_success
+            if not need_key:
+                return
+
+            try:
+                key_proc = self._run([key_binary_path, processing_file, key_yaml_path])
+            except AnalysisCancelled:
+                key_success = False
+                return
+
+            if key_proc.returncode != 0:
+                key_success = False
+                self._log_process_failure(f"Key binary {key_binary_path} failed on file {processing_file}", key_proc)
+                return
+
+        rhythm_thread = threading.Thread(target=run_rhythm)
+        rhythm_thread.start()
+
+        key_thread = threading.Thread(target=run_key)
+        key_thread.start()
+
+        musicnn_success = True
         try:
-            rhythm_success = True
-            def run_rhythm():
-                nonlocal rhythm_success
-                if os.path.exists(os.path.join(output_path, "rhythm.yaml")):
-                    return
-
-                rhythm_proc = subprocess.run(
-                    [rhythm_binary_path, processing_file],
-                    capture_output=True,
-                    text=True,
-                    env=ENV,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                )
-                
-                if rhythm_proc.returncode != 0:
-                    rhythm_success = False
-                    log.error(f"Rhythm binary {rhythm_binary_path} failed on file {processing_file} with exit code {rhythm_proc.returncode}")
-                    if rhythm_proc.stdout:
-                        log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
-                    if rhythm_proc.stderr:
-                        log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
-                    return
-
-                try:
-                    stdout = rhythm_proc.stdout or ""
-                    lines = stdout.splitlines(keepends=True)
-                    if not lines:
-                        raise ValueError("Rhythm binary produced no stdout")
-
-                    yaml_lines = lines[-5:] if len(lines) >= 5 else lines
-                    yaml_str = "".join(yaml_lines)
-                    if not yaml_str.strip():
-                        raise ValueError("Empty YAML section extracted from rhythm binary output")
-
-                    out_file = os.path.join(output_path, "rhythm.yaml")
-                    with open(out_file, "w", encoding="utf-8") as f:
-                        f.write(yaml_str)
-                except Exception as e:
-                    rhythm_success = False
-                    log.error(f"Failed to extract/save rhythm.yaml from rhythm binary stdout: {e}")
-                    if rhythm_proc.stdout:
-                        log.error(f"Rhythm stdout: {rhythm_proc.stdout}")
-                    if rhythm_proc.stderr:
-                        log.error(f"Rhythm stderr: {rhythm_proc.stderr}")
-                    return
-            
-            key_success = True
-            def run_key():
-                nonlocal key_success
-                if os.path.exists(os.path.join(output_path, "key.yaml")):
-                    return
-
-                key_proc = subprocess.run(
-                    [key_binary_path, processing_file, os.path.join(output_path, "key.yaml")],
-                    capture_output=True,
-                    text=True,
-                    env=ENV,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                )
-
-                if key_proc.returncode != 0:
-                    key_success = False
-                    log.error(f"Key binary {key_binary_path} failed on file {processing_file} with exit code {key_proc.returncode}")
-                    if key_proc.stdout:
-                        log.error(f"Key stdout: {key_proc.stdout}")
-                    if key_proc.stderr:
-                        log.error(f"Key stderr: {key_proc.stderr}")
-                    return
-
-            rhythm_thread = threading.Thread(target=run_rhythm)
-            rhythm_thread.start()
-
-            key_thread = threading.Thread(target=run_key)
-            key_thread.start()
-
-            musicnn_success = self._run_musicnn_models(REQUIRED_MODELS, musicnn_binary_path, processing_file, output_path)
+            if pending_models:
+                musicnn_success = self._run_musicnn_models(settings, pending_models, musicnn_binary_path, processing_file, output_path)
+        finally:
             rhythm_thread.join()
             key_thread.join()
+        self._check_cancelled()
 
-            return rhythm_success and key_success and musicnn_success
-        finally:
-            if temp_file:
-                self._cleanup_temp_file(temp_file)
+        return rhythm_success and key_success and musicnn_success
 
-    def analyze_optional(self, metadata: Dict, file: str) -> bool:        
-        if not self._check_binaries():
-            log.error("Essentia binaries not found")
+    def analyze_optional(self, settings: Settings, source: ProcessingFile, output_path: str) -> bool:
+        if not self._check_binaries(settings):
+            self.log.error("Essentia binaries not found")
             return False
 
-        if not self._check_optional_models():
-            log.error("Optional models not found")
+        if not self._check_optional_models(settings):
+            self.log.error("Optional models not found")
             return False
-        
+
         try:
-            musicnn_binary_path = self._get_binary_paths()[0]
+            musicnn_binary_path = self._get_binary_paths(settings)[0]
         except (ValueError, FileNotFoundError) as e:
-            log.error(str(e))
-            return False
-    
-        try:
-            output_path = self._generate_cache_folder(metadata, file)
-            if not output_path:
-                log.error("Failed to generate cache folder path")
-                return False
-        except Exception as e:
-            log.error(f"Error generating cache folder: {e}")
+            self.log.error(str(e))
             return False
 
-        processing_file, temp_file = self._get_processing_file(file)
-        
-        try:
-            return self._run_musicnn_models(OPTIONAL_MODELS, musicnn_binary_path, processing_file, output_path)
-        finally:
-            if temp_file:
-                self._cleanup_temp_file(temp_file)
-    
-    def parse_required(self, metadata: Dict, file: str) -> bool:
-        if not self._check_required_models():
-            log.error("Required models not found")
-            return False
-        
-        models_path = config.setting["acousticbrainz_ng_models_path"]
-        if not models_path:
-            log.error("Models path not configured")
-            return False
+        pending_models = self._pending_models(OPTIONAL_MODELS, output_path)
+        if not pending_models:
+            return True
+
+        return self._run_musicnn_models(settings, pending_models, musicnn_binary_path, source.get(), output_path)
+
+    def _load_model_output(self, settings: Settings, model: str, output: str, output_path: str) -> Optional[Tuple[List[str], List[float]]]:
+        model_json_path = os.path.join(settings.models_path, f"{model}.json")
+        if not os.path.exists(model_json_path):
+            self.log.error(f"Model JSON metadata not found: {model_json_path}")
+            return None
+
+        output_file_path = os.path.join(output_path, f"{output}.json")
+        if not os.path.exists(output_file_path):
+            self.log.error(f"Output file not found: {output_file_path}")
+            return None
 
         try:
-            output_path = self._generate_cache_folder(metadata, file)
-            if not output_path:
-                log.error("Failed to generate cache folder path")
-                return False
-        except Exception as e:
-            log.error(f"Error generating cache folder: {e}")
-            return False
-        
-        moods = []
-        tags = []
-        
-        for model, output in REQUIRED_MODELS:
-            model_json_path = os.path.join(models_path, f"{model}.json")
-            if not os.path.exists(model_json_path):
-                log.error(f"Model JSON metadata not found: {model_json_path}")
-                return False
-            
-            output_file_path = os.path.join(output_path, f"{output}.json")
-            if not os.path.exists(output_file_path):
-                log.error(f"Output file not found: {output_file_path}")
-                return False
-            
-            output_data = {}
-            model_metadata = {}
+            with open(model_json_path, 'r', encoding='utf-8') as f:
+                model_metadata = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            self.log.error(f"Error reading model metadata file: {e}")
+            return None
 
+        try:
+            with open(output_file_path, 'r', encoding='utf-8') as f:
+                output_data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            # Most likely left behind by an interrupted run, remove it so that
+            # the next analysis recomputes it instead of failing forever
+            self.log.error(f"Error reading output file, removing it: {e}")
             try:
-                with open(model_json_path, 'r', encoding='utf-8') as f:
-                    model_metadata = json.load(f)
-                
-                with open(output_file_path, 'r', encoding='utf-8') as f:
-                    output_data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                log.error(f"Error reading model or output file: {e}")
-                return False
+                os.remove(output_file_path)
+            except OSError:
+                pass
+            return None
 
-            if not output_data["predictions"] or not output_data["predictions"]["mean"]:
-                log.error(f"No predictions found in output data for {model}")
-                return False
-            
-            if not model_metadata["classes"] or len(model_metadata["classes"]) != len(output_data["predictions"]["mean"]):
-                log.error(f"No or invalid classes defined in model metadata for {model}")
-                return False
+        values = (output_data.get("predictions") or {}).get("mean")
+        if not values:
+            self.log.error(f"No predictions found in output data for {model}")
+            return None
 
-            if len(model_metadata["classes"]) == 2:
-                values = output_data["predictions"]["mean"]
+        classes = model_metadata.get("classes")
+        if not classes or len(classes) != len(values):
+            self.log.error(f"No or invalid classes defined in model metadata for {model}")
+            return None
+
+        return classes, values
+
+    @staticmethod
+    def _raw_tags(output: str, classes: List[str], values: List[float]) -> Dict[str, float]:
+        return {
+            f"ab:hi:{output}:{class_name.replace('non', 'not').replace('_', ' ').lower()}": value
+            for class_name, value in zip(classes, values)
+        }
+
+    def parse_required(self, settings: Settings, output_path: str, tags: Dict[str, Any]) -> bool:
+        if not self._check_required_models(settings):
+            self.log.error("Required models not found")
+            return False
+
+        moods = []
+        msd_tags = []
+
+        for model, output in REQUIRED_MODELS:
+            loaded = self._load_model_output(settings, model, output, output_path)
+            if loaded is None:
+                return False
+            classes, values = loaded
+
+            if len(classes) == 2:
                 max_index = values.index(max(values))
-
-                mood_class = model_metadata["classes"][max_index]
-                mood_formatted = self._format_class(mood_class)
-                moods.append(mood_formatted)
+                moods.append(self._format_class(classes[max_index]))
             elif model == REQUIRED_MODELS[0][0]:
-                values = output_data["predictions"]["mean"]
-                class_value_pairs = [
-                    {"class": class_name, "value": value}
-                    for class_name, value in zip(model_metadata["classes"], values)
-                ]
+                top5 = sorted(zip(classes, values), key=lambda x: x[1], reverse=True)[:5]
 
-                top5 = sorted(class_value_pairs, key=lambda x: x["value"], reverse=True)[:5]
+                for class_name, _ in top5:
+                    msd_tags.append(class_name[0].upper() + class_name[1:] if class_name else "")
 
-                for item in top5:
-                    formatted_tag = item["class"][0].upper() + item["class"][1:] if item["class"] else ""
-                    tags.append(formatted_tag)
-            
-            if config.setting["acousticbrainz_ng_save_raw"]:
-                for i in range(len(output_data["predictions"]["mean"])):
-                    metadata[f"ab:hi:{output}:{model_metadata['classes'][i].replace('non', 'not').replace('_', ' ').lower()}"] = output_data["predictions"]["mean"][i]
+            if settings.save_raw:
+                tags.update(self._raw_tags(output, classes, values))
 
-        metadata['mood'] = moods
-        metadata['tags'] = tags
-        
-        rhythm_data = {}
+        tags['mood'] = moods
+        tags['tags'] = msd_tags
+
         rhythm_yaml_path = os.path.join(output_path, "rhythm.yaml")
-
-        key_data = {}
         key_yaml_path = os.path.join(output_path, "key.yaml")
 
-        if os.path.exists(rhythm_yaml_path):
-            with open(rhythm_yaml_path, 'r', encoding='utf-8') as f:
-                loaded = yaml.safe_load(f)
-
-            if not isinstance(loaded, dict):
-                log.error("Invalid rhythm YAML format: expected a mapping at the top level")
-                return False
-
-            rhythm_data = loaded
-        else:
-            log.error(f"Rhythm YAML file not found: {rhythm_yaml_path}")
-            return False
-
-        if os.path.exists(key_yaml_path):
-            with open(key_yaml_path, 'r', encoding='utf-8') as f:
-                loaded = yaml.safe_load(f)
-            if not isinstance(loaded, dict):
-                log.error("Invalid key YAML format: expected a mapping at the top level")
-                return False
-
-            key_data = loaded
-        else:
-            log.error(f"Key YAML file not found: {key_yaml_path}")
-            return False
-
         try:
-            metadata["bpm"] = int(round(rhythm_data["bpm"]))
-            metadata["key"] = "o" if key_data["tonal"]["key_scale"] == "off" else f"{key_data['tonal']['key']}{'m' if key_data['tonal']['key_scale'] == 'minor' else ''}"
+            rhythm_data = self._load_yaml(rhythm_yaml_path, "rhythm")
+            key_data = self._load_yaml(key_yaml_path, "key")
+            if rhythm_data is None or key_data is None:
+                return False
 
-            if config.setting["acousticbrainz_ng_save_raw"]:
-                metadata["ab:lo:tonal:key_scale"] = key_data["tonal"]["key_scale"]
-                metadata["ab:lo:tonal:key_key"] = key_data["tonal"]["key"]
-            
+            tags["bpm"] = int(round(rhythm_data["bpm"]))
+            tags["key"] = "o" if key_data["tonal"]["key_scale"] == "off" else f"{key_data['tonal']['key']}{'m' if key_data['tonal']['key_scale'] == 'minor' else ''}"
+
+            if settings.save_raw:
+                tags["ab:lo:tonal:key_scale"] = key_data["tonal"]["key_scale"]
+                tags["ab:lo:tonal:key_key"] = key_data["tonal"]["key"]
+
             return True
         except Exception as e:
-            log.error(f"Error processing feature data: {e}")
-            return False
-    
-    def parse_optional(self, metadata: Dict, file: str) -> bool:
-        if not self._check_optional_models():
-            log.error("Optional models not found")
-            return False
-        
-        models_path = config.setting["acousticbrainz_ng_models_path"]
-        if not models_path:
-            log.error("Models path not configured")
+            self.log.error(f"Error processing feature data: {e}")
             return False
 
-        try:
-            output_path = self._generate_cache_folder(metadata, file)
-            if not output_path:
-                log.error("Failed to generate cache folder path")
-                return False
-        except Exception as e:
-            log.error(f"Error generating cache folder: {e}")
+    def _load_yaml(self, path: str, name: str) -> Optional[Dict]:
+        if not os.path.exists(path):
+            self.log.error(f"{name.capitalize()} YAML file not found: {path}")
+            return None
+
+        with open(path, 'r', encoding='utf-8') as f:
+            loaded = yaml.safe_load(f)
+
+        if not isinstance(loaded, dict):
+            self.log.error(f"Invalid {name} YAML format: expected a mapping at the top level")
+            return None
+
+        return loaded
+
+    def parse_optional(self, settings: Settings, output_path: str, tags: Dict[str, Any]) -> bool:
+        if not self._check_optional_models(settings):
+            self.log.error("Optional models not found")
             return False
-        
+
         for model, output in OPTIONAL_MODELS:
-            model_json_path = os.path.join(models_path, f"{model}.json")
-            if not os.path.exists(model_json_path):
-                log.error(f"Model JSON metadata not found: {model_json_path}")
-                return False
-            
-            output_file_path = os.path.join(output_path, f"{output}.json")
-            if not os.path.exists(output_file_path):
-                log.error(f"Output file not found: {output_file_path}")
-                return False
-            
-            output_data = {}
-            model_metadata = {}
-
-            try:
-                with open(model_json_path, 'r', encoding='utf-8') as f:
-                    model_metadata = json.load(f)
-                
-                with open(output_file_path, 'r', encoding='utf-8') as f:
-                    output_data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                log.error(f"Error reading model or output file: {e}")
+            loaded = self._load_model_output(settings, model, output, output_path)
+            if loaded is None:
                 return False
 
-            if not output_data["predictions"] or not output_data["predictions"]["mean"]:
-                log.error(f"No predictions found in output data for {model}")
-                return False
-            
-            if not model_metadata["classes"] or len(model_metadata["classes"]) != len(output_data["predictions"]["mean"]):
-                log.error(f"No or invalid classes defined in model metadata for {model}")
-                return False
-            
-            if config.setting["acousticbrainz_ng_save_raw"]:
-                for i in range(len(output_data["predictions"]["mean"])):
-                    metadata[f"ab:hi:{output}:{model_metadata['classes'][i].replace('non', 'not').replace('_', ' ').lower()}"] = output_data["predictions"]["mean"][i]
+            if settings.save_raw:
+                tags.update(self._raw_tags(output, *loaded))
 
         return True
-    
-    def save_fingerprint(self, metadata: Dict, file_path: str, file_obj) -> bool:
-        if not self._check_optional_models():
-            log.error("Optional models not found")
-            return False
-        
-        models_path = config.setting["acousticbrainz_ng_models_path"]
-        if not models_path:
-            log.error("Models path not configured")
-            return False
 
-        try:
-            output_path = self._generate_cache_folder(metadata, file_path)
-            if not output_path:
-                log.error("Failed to generate cache folder path")
-                return False
-        except Exception as e:
-            log.error(f"Error generating cache folder: {e}")
-            return False
-        
-        try:
-            output_path = self._generate_cache_folder(metadata, file_path)
-            if not output_path:
-                log.error("Failed to generate cache folder path")
-                return False
-        except Exception as e:
-            log.error(f"Error generating cache folder: {e}")
-            return False
+    def build_fingerprint(self, settings: Settings, output_path: str) -> Optional[Tuple[bytes, str]]:
+        # Values are read from the cached model outputs in a fixed order, so the
+        # fingerprint doesn't depend on "Save raw values" or on the tag order
+        # of previously saved files
+        fingerprint_data: List[float] = []
 
-        fingerprint_data = []
+        for model, output in REQUIRED_MODELS + OPTIONAL_MODELS:
+            loaded = self._load_model_output(settings, model, output, output_path)
+            if loaded is None:
+                return None
+            fingerprint_data.extend(float(value) for value in loaded[1])
 
-        for key, value in metadata.items():
-            if key.lower().startswith("ab:hi:"):
-                try:
-                    float_value = float(value)
-                    if 0 <= float_value <= 1:
-                        fingerprint_data.append(float_value)
-                except (ValueError, TypeError):
-                    continue
-
-        if not fingerprint_data:
-            log.error("No valid fingerprint data found in metadata")
-            return False
-        
-        if len(fingerprint_data) != 95:
-            log.error(f"Fingerprint expected exactly 95 values, got {len(fingerprint_data)}")
-            return False
+        if len(fingerprint_data) != FINGERPRINT_VALUES:
+            self.log.error(f"Fingerprint expected exactly {FINGERPRINT_VALUES} values, got {len(fingerprint_data)}")
+            return None
 
         fingerprint_file = os.path.join(output_path, "fingerprint.png")
-        
+
         try:
-            try:
-                import numpy as _np
-            except Exception as e:
-                log.error(f"numpy is required to generate fingerprint PNG: {e}")
-                return False
-
-            def _checksum_floats(values, n=5):
-                arr = _np.clip(_np.asarray(values, dtype=float).flatten(), 0.0, 1.0)
-                b = (arr * 65535).astype(_np.uint16).tobytes()
-                buf = hashlib.sha256(b).digest()
-
-                while len(buf) < n * 4:
-                    buf += hashlib.sha256(buf).digest()
-
-                out = []
-
-                for i in range(n):
-                    start = i * 4
-                    u = struct.unpack(">I", buf[start:start+4])[0]
-                    out.append(u / 0xFFFFFFFF)
-
-                return _np.array(out, dtype=float)
-
-            def _to_grayscale_uint8(arr):
-                a = _np.clip(_np.asarray(arr, dtype=float), 0.0, 1.0)
-                return (255 - _np.round(a * 255)).astype(_np.uint8)
-
-            def _png_write_grayscale(path, img8):
-                if img8.ndim != 2 or img8.dtype != _np.uint8:
-                    raise ValueError("img8 must be a 2D numpy array of dtype uint8")
-                height, width = int(img8.shape[0]), int(img8.shape[1])
-
-                def _chunk(c_type, data):
-                    chunk = struct.pack(">I", len(data)) + c_type + data
-                    crc = zlib.crc32(c_type + data) & 0xFFFFFFFF
-                    return chunk + struct.pack(">I", crc)
-
-                png_sig = b'\x89PNG\r\n\x1a\n'
-                ihdr = struct.pack(">IIBBBBB",
-                                   width, height,
-                                   8,    # bit depth
-                                   0,    # color type = 0 (grayscale)
-                                   0,    # compression
-                                   0,    # filter
-                                   0)    # interlace
-                raw = bytearray()
-                for y in range(height):
-                    raw.append(0)
-                    raw.extend(img8[y].tobytes())
-                comp = zlib.compress(bytes(raw), level=9)
-
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "wb") as f:
-                    f.write(png_sig)
-                    f.write(_chunk(b'IHDR', ihdr))
-                    f.write(_chunk(b'IDAT', comp))
-                    f.write(_chunk(b'IEND', b''))
-
-            v = _np.clip(_np.asarray(fingerprint_data, dtype=float).flatten(), 0.0, 1.0)
-            base = _np.zeros(100, dtype=float)
-            base[:95] = v
-            base[95:] = _checksum_floats(v, n=5)
-            base = base.reshape((10, 10))
-
-            img8 = _to_grayscale_uint8(base)
-
-            _png_write_grayscale(fingerprint_file, img8)
-            
-            fingerprint_url = f"file://{fingerprint_file.replace(os.sep, '/')}"
-            
-            with open(fingerprint_file, "rb") as f:
-                fingerprint_data_bytes = f.read()
-            
-            cover_art_image = CoverArtImage(url=fingerprint_url, data=fingerprint_data_bytes, comment=f"{PLUGIN_NAME} fingerprint", types=['other'], support_types=True)
-
-            file_obj.metadata.images.append(cover_art_image)
-
-            file_obj.metadata_images_changed.emit()
-
+            png = _fingerprint_png(fingerprint_data)
+            with open(fingerprint_file, "wb") as f:
+                f.write(png)
         except Exception as e:
-            log.error(f"Failed to create fingerprint PNG: {e}")
-            return False
+            self.log.error(f"Failed to create fingerprint PNG: {e}")
+            return None
 
-        return True
+        return png, fingerprint_file
 
     @staticmethod
     def _format_class(class_name: str) -> str:
         return class_name.replace("non", "not").replace("_", " ").capitalize()
 
-    def _generate_cache_folder(self, metadata: Dict, file_path: str) -> str:
-        cache_base = config.setting["acousticbrainz_ng_cache_path"]
+    def _generate_cache_folder(self, settings: Settings, metadata: Dict[str, str], file_path: str, create: bool = True) -> str:
+        cache_base = settings.cache_path
         if not cache_base:
             raise ValueError("Cache path not configured")
 
-        release_artist_mbid = metadata.get('musicbrainz_albumartistid', 'NO_MBID')
-        release_group_mbid = metadata.get('musicbrainz_releasegroupid', 'NO_MBID')
-        release_mbid = metadata.get('musicbrainz_albumid', 'NO_MBID')
+        release_artist_mbid = metadata.get('musicbrainz_albumartistid') or 'NO_MBID'
+        release_group_mbid = metadata.get('musicbrainz_releasegroupid') or 'NO_MBID'
+        release_mbid = metadata.get('musicbrainz_albumid') or 'NO_MBID'
         recording_mbid = metadata.get('musicbrainz_recordingid')
-        
+
         if not recording_mbid:
-            recording_mbid = self._get_audio_hash(file_path)
+            recording_mbid = self._get_audio_hash(settings, file_path)
 
         cache_folder = os.path.join(
             str(cache_base),
@@ -609,96 +579,85 @@ class AcousticBrainzNG:
             str(recording_mbid)
         )
 
-        os.makedirs(cache_folder, exist_ok=True)
-        
+        if create:
+            os.makedirs(cache_folder, exist_ok=True)
+
         return cache_folder
-    
-    def _get_audio_hash(self, file_path: str) -> str:
+
+    def _get_audio_hash(self, settings: Settings, file_path: str) -> str:
         try:
-            binaries_path = config.setting["acousticbrainz_ng_binaries_path"]
+            binaries_path = settings.binaries_path
             if not binaries_path:
                 raise ValueError("Binaries path not configured")
-                
+
             binary_path = self._get_binary_path("streaming_md5", binaries_path)
-            
-            result = subprocess.run(
-                [binary_path, file_path],
-                capture_output=True,
-                text=True,
-                env=ENV,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            
+
+            result = self._run([binary_path, file_path])
+
             if result.returncode == 0:
                 for line in result.stdout.strip().split('\n'):
                     if line.startswith('MD5:'):
                         return line.split('MD5:')[1].strip()
             else:
-                log.error(f"MD5 binary {binary_path} failed on file {file_path} with exit code {result.returncode}")
-                if result.stdout:
-                    log.error(f"MD5 stdout: {result.stdout}")
-                if result.stderr:
-                    log.error(f"MD5 stderr: {result.stderr}")
-            
-            log.error(f"Failed to calculate audio hash for file {file_path}: MD5 not found in output")
-            
+                self._log_process_failure(f"MD5 binary {binary_path} failed on file {file_path}", result)
+
+            self.log.error(f"Failed to calculate audio hash for file {file_path}: MD5 not found in output")
+
+        except AnalysisCancelled:
+            raise
         except Exception as e:
-            log.error(f"Error calculating audio hash: {e}")
+            self.log.error(f"Error calculating audio hash: {e}")
 
         return f"fallback_{hashlib.md5(file_path.encode('utf-8')).hexdigest()}"
-    
-    def _check_binaries(self) -> bool:
-        path = config.setting["acousticbrainz_ng_binaries_path"]
-        
+
+    def _check_binaries(self, settings: Settings) -> bool:
+        path = settings.binaries_path
+
         if not path or not os.path.exists(path):
             return False
-        
+
         for binary in REQUIRED_BINARIES:
             binary_path = self._get_binary_path(binary, path)
             if not os.path.exists(binary_path):
                 return False
-        
+
         return True
 
-    def _check_models(self, models: List[Tuple[str, str]]) -> bool:
-        path = config.setting["acousticbrainz_ng_models_path"]
-        
+    @staticmethod
+    def _check_models(settings: Settings, models: List[Tuple[str, str]]) -> bool:
+        path = settings.models_path
+
         if not path or not os.path.exists(path):
             return False
-        
+
         for model in models:
             model_path = os.path.join(path, f"{model[0]}.pb")
             if not os.path.exists(model_path):
                 return False
-        
+
         return True
 
-    def _check_required_models(self) -> bool:
-        return self._check_models(REQUIRED_MODELS)
+    def _check_required_models(self, settings: Settings) -> bool:
+        return self._check_models(settings, REQUIRED_MODELS)
 
-    def _check_optional_models(self) -> bool:
-        return self._check_models(OPTIONAL_MODELS)
+    def _check_optional_models(self, settings: Settings) -> bool:
+        return self._check_models(settings, OPTIONAL_MODELS)
 
-    def _is_opus_file(self, file_path: str) -> bool:
+    @staticmethod
+    def _is_opus_file(file_path: str) -> bool:
         return file_path.lower().endswith('.opus')
-    
-    def _get_audio_channel_count(self, file_path: str) -> int:
+
+    def _get_audio_channel_count(self, settings: Settings, file_path: str) -> int:
         try:
-            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
+            ffmpeg_path = settings.ffmpeg_path
             if not ffmpeg_path:
-                log.warning("FFmpeg path not configured, assuming stereo")
+                self.log.warning("FFmpeg path not configured, assuming stereo")
                 return 2
-            
-            ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe" + (".exe" if os.name == 'nt' else ""))
-            
+
+            ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), _exe("ffprobe"))
+
             if not os.path.exists(ffprobe_path):
-                probe_proc = subprocess.run(
-                    [ffmpeg_path, "-hide_banner", "-i", file_path],
-                    capture_output=True,
-                    text=True,
-                    env=ENV,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                )
+                probe_proc = self._run([ffmpeg_path, "-hide_banner", "-nostdin", "-i", file_path])
 
                 output = probe_proc.stderr or ""
 
@@ -719,805 +678,568 @@ class AcousticBrainzNG:
 
                 return 2
             else:
-                probe_proc = subprocess.run(
-                    [ffprobe_path, "-v", "error", "-select_streams", "a:0", 
-                     "-show_entries", "stream=channels", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-                    capture_output=True,
-                    text=True,
-                    env=ENV,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                probe_proc = self._run(
+                    [ffprobe_path, "-v", "error", "-select_streams", "a:0",
+                     "-show_entries", "stream=channels", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
                 )
-                
+
                 if probe_proc.returncode == 0 and probe_proc.stdout.strip():
                     try:
                         return int(probe_proc.stdout.strip())
                     except ValueError:
                         pass
-                
+
                 return 2
-                
+
+        except AnalysisCancelled:
+            raise
         except Exception as e:
-            log.warning(f"Error detecting audio channels for {file_path}: {e}, assuming stereo")
+            self.log.warning(f"Error detecting audio channels for {file_path}: {e}, assuming stereo")
             return 2
-    
-    def _create_stereo_downmix(self, file_path: str) -> Optional[str]:
-        try:
-            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
-            if not ffmpeg_path:
-                log.error("FFmpeg path not configured, cannot downmix")
-                return None
 
-            file_ext = os.path.splitext(file_path)[1]
-            temp_dir = tempfile.mkdtemp(prefix="acousticbrainz_ng_")
-            temp_file = os.path.join(temp_dir, f"stereo_downmix{file_ext}")
-            
-            log.debug(f"Downmixing multichannel audio to stereo: {file_path} -> {temp_file}")
-
-            downmix_proc = subprocess.run(
-                [ffmpeg_path, "-hide_banner", "-i", file_path, "-ac", "2", "-y", temp_file],
-                capture_output=True,
-                text=True,
-                env=ENV,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            
-            if downmix_proc.returncode != 0:
-                log.error(f"FFmpeg downmix failed for {file_path} with exit code {downmix_proc.returncode}")
-                if downmix_proc.stderr:
-                    log.error(f"FFmpeg stderr: {downmix_proc.stderr}")
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-                return None
-            
-            if os.path.exists(temp_file):
-                log.debug(f"Successfully created stereo downmix: {temp_file}")
-                return temp_file
-            else:
-                log.error(f"Stereo downmix file was not created: {temp_file}")
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-                return None
-                
-        except Exception as e:
-            log.error(f"Error creating stereo downmix for {file_path}: {e}")
+    def _create_stereo_downmix(self, settings: Settings, file_path: str) -> Optional[str]:
+        ffmpeg_path = settings.ffmpeg_path
+        if not ffmpeg_path:
+            self.log.error("FFmpeg path not configured, cannot downmix")
             return None
-    
+
+        file_ext = os.path.splitext(file_path)[1]
+        temp_dir = tempfile.mkdtemp(prefix="acousticbrainz_ng_")
+        temp_file = os.path.join(temp_dir, f"stereo_downmix{file_ext}")
+        success = False
+
+        try:
+            self.log.debug(f"Downmixing multichannel audio to stereo: {file_path} -> {temp_file}")
+
+            downmix_proc = self._run([ffmpeg_path, "-hide_banner", "-nostdin", "-i", file_path, "-ac", "2", "-y", temp_file])
+
+            if downmix_proc.returncode != 0:
+                self._log_process_failure(f"FFmpeg downmix failed for {file_path}", downmix_proc)
+            elif not os.path.exists(temp_file):
+                self.log.error(f"Stereo downmix file was not created: {temp_file}")
+            else:
+                self.log.debug(f"Successfully created stereo downmix: {temp_file}")
+                success = True
+        except AnalysisCancelled:
+            raise
+        except Exception as e:
+            self.log.error(f"Error creating stereo downmix for {file_path}: {e}")
+        finally:
+            if not success:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return temp_file if success else None
+
     def _cleanup_temp_file(self, temp_file_path: str) -> None:
         try:
             if temp_file_path and os.path.exists(temp_file_path):
                 temp_dir = os.path.dirname(temp_file_path)
                 shutil.rmtree(temp_dir)
-                log.debug(f"Cleaned up temporary directory: {temp_dir}")
+                self.log.debug(f"Cleaned up temporary directory: {temp_dir}")
         except Exception as e:
-            log.warning(f"Failed to clean up temporary file {temp_file_path}: {e}")
-    
-    def _get_processing_file(self, file_path: str) -> Tuple[str, Optional[str]]:
-        channels = self._get_audio_channel_count(file_path)
-        
+            self.log.warning(f"Failed to clean up temporary file {temp_file_path}: {e}")
+
+    def _get_processing_file(self, settings: Settings, file_path: str) -> Tuple[str, Optional[str]]:
+        channels = self._get_audio_channel_count(settings, file_path)
+
         if channels > 2:
-            log.info(f"File {file_path} has {channels} channels, creating stereo downmix for processing")
-            temp_file = self._create_stereo_downmix(file_path)
+            self.log.info(f"File {file_path} has {channels} channels, creating stereo downmix for processing")
+            temp_file = self._create_stereo_downmix(settings, file_path)
             if temp_file:
                 return (temp_file, temp_file)
             else:
-                log.warning(f"Failed to create stereo downmix for {file_path}, attempting to process original")
+                self.log.warning(f"Failed to create stereo downmix for {file_path}, attempting to process original")
                 return (file_path, None)
-        
+
         return (file_path, None)
-    
-    def calculate_track_loudness(self, file_path: str) -> Dict:
+
+    def _measure_loudness(self, settings: Settings, args: List[str], description: str) -> Optional[Dict[str, float]]:
+        # The loudnorm measurement of the input does not depend on the target
+        # loudness, so a single pass covers both ReplayGain and R128
+        ffmpeg_path = settings.ffmpeg_path
+        if not ffmpeg_path:
+            self.log.error("FFmpeg path not configured")
+            return None
+
+        proc = self._run([ffmpeg_path, "-hide_banner", "-nostdin", *args, "-f", "null", "-"])
+
+        if proc.returncode != 0:
+            self._log_process_failure(f"FFmpeg loudness measurement failed for {description}", proc)
+            return None
+
+        output = proc.stderr or ""
+        start = output.rfind("{")
+        end = output.rfind("}")
+        if start == -1 or end < start:
+            self.log.error(f"FFmpeg loudness measurement for {description} produced no JSON output")
+            return None
+
         try:
-            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
-            if not ffmpeg_path:
-                raise ValueError("FFmpeg path not configured")
-            
-            replaygain_proc = subprocess.run(
-                [ffmpeg_path, "-hide_banner", "-i", file_path, "-af", f"loudnorm=I={config.setting['acousticbrainz_ng_replaygain_reference_loudness']}:print_format=json", "-f", "null", "-"],
-                capture_output=True,
-                text=True,
-                env=ENV,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            
-            if replaygain_proc.returncode != 0:
-                log.error(f"FFmpeg failed for ReplayGain LUFS calculation on file {file_path} with exit code {replaygain_proc.returncode}")
-                if replaygain_proc.stdout:
-                    log.error(f"FFmpeg stdout: {replaygain_proc.stdout}")
-                if replaygain_proc.stderr:
-                    log.error(f"FFmpeg stderr: {replaygain_proc.stderr}")
-                return {}
-            
-            replaygain_log = replaygain_proc.stderr or replaygain_proc.stdout
-            replaygain_log = "\n".join((replaygain_log or "").splitlines()[-15:])
-            
-            replaygain_match = re.search(r'\{.*?\}', replaygain_log, re.S)
-            replaygain_matches = re.findall(r'\{.*?\}', replaygain_log, re.S) if not replaygain_match else None
-            replaygain_json_text = replaygain_match.group(0) if replaygain_match else (replaygain_matches[0] if replaygain_matches else None)
-            
-            replaygain_gain = None
-            replaygain_peak = None
-            replaygain_range = None
-            
-            replaygain_lufs_result: dict | None = None
-            
-            if replaygain_json_text:
-                try:
-                    replaygain_lufs_result = json.loads(replaygain_json_text)
-                except json.JSONDecodeError:
-                    if replaygain_matches:
-                        try:
-                            replaygain_lufs_result = json.loads(replaygain_matches[-1])
-                        except Exception:
-                            replaygain_lufs_result = None
+            data = json.loads(output[start:end + 1])
+        except json.JSONDecodeError as e:
+            self.log.error(f"Failed to parse FFmpeg loudness output for {description}: {e}")
+            return None
 
-            input_i = replaygain_lufs_result.get('input_i') if replaygain_lufs_result else None
-            input_tp = replaygain_lufs_result.get('input_tp') if replaygain_lufs_result else None
-            input_lra = replaygain_lufs_result.get('input_lra') if replaygain_lufs_result else None
-
-            input_i_val = None
-            input_tp_val = None
-            input_lra_val = None
-            
+        measurement = {}
+        for key in ("input_i", "input_tp", "input_lra"):
             try:
-                if input_i is not None:
-                    input_i_val = float(input_i)
+                value = float(data.get(key))
             except (TypeError, ValueError):
-                input_i_val = None
+                continue
+            if math.isfinite(value):
+                measurement[key] = value
+        return measurement
 
-            try:
-                if input_tp is not None:
-                    input_tp_val = float(input_tp)
-            except (TypeError, ValueError):
-                input_tp_val = None
-            
-            try:
-                if input_lra is not None:
-                    input_lra_val = float(input_lra)
-            except (TypeError, ValueError):
-                input_lra_val = None
+    def _measure_album_loudness(self, settings: Settings, album_track_files: List[str]) -> Optional[Dict[str, float]]:
+        # The concat filter converts differing sample rates and formats into a
+        # single stream. The concat demuxer would restart the loudness filter
+        # whenever the audio parameters change and only measure part of the album
+        album_track_files = sorted(album_track_files)
+        input_args = []
+        for audio_file in album_track_files:
+            input_args += ["-i", audio_file]
 
-            if input_i_val is not None and math.isfinite(input_i_val):
-                replaygain_gain = f"{(config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18) - input_i_val:.2f}"
+        # Automatic channel layout conversion between e.g. stereo and 5.1 skews
+        # the measurement, so convert everything to stereo in that case
+        channel_counts = {self._get_audio_channel_count(settings, audio_file) for audio_file in album_track_files}
+        input_filter = "aformat=channel_layouts=stereo" if len(channel_counts) > 1 else "anull"
+        if len(channel_counts) > 1:
+            self.log.warning(f"Album files have different channel counts {sorted(channel_counts)}, measuring album loudness as stereo")
 
-            if input_tp_val is not None and math.isfinite(input_tp_val):
-                replaygain_peak = f"{10 ** (input_tp_val / 20):.6f}"
+        filter_graph = "".join(f"[{i}:a:0]{input_filter}[a{i}];" for i in range(len(album_track_files)))
+        filter_graph += "".join(f"[a{i}]" for i in range(len(album_track_files)))
+        filter_graph += f"concat=n={len(album_track_files)}:v=0:a=1,loudnorm=print_format=json"
 
-            if input_lra_val is not None and math.isfinite(input_lra_val):
-                replaygain_range = f"{input_lra_val:.2f}"
-            
-            result: Dict = {
-                "replaygain_track_gain": replaygain_gain,
-                "replaygain_track_peak": replaygain_peak,
-                "replaygain_track_range": replaygain_range,
-                "replaygain_reference_loudness": f"{(config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18):.2f}"
-            }
-            
-            r128_proc = subprocess.run(
-                [ffmpeg_path, "-hide_banner", "-i", file_path, "-af", "loudnorm=I=-23:print_format=json", "-f", "null", "-"],
-                capture_output=True,
-                text=True,
-                env=ENV,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            
-            if r128_proc.returncode != 0:
-                log.error(f"FFmpeg failed for R128 calculation on file {file_path} with exit code {r128_proc.returncode}")
-                if r128_proc.stdout:
-                    log.error(f"FFmpeg stdout: {r128_proc.stdout}")
-                if r128_proc.stderr:
-                    log.error(f"FFmpeg stderr: {r128_proc.stderr}")
-                return result
+        return self._measure_loudness(
+            settings,
+            [*input_args, "-filter_complex", filter_graph],
+            f"album with {len(album_track_files)} files"
+        )
 
-            r128_log = r128_proc.stderr or r128_proc.stdout
-            r128_log = "\n".join((r128_log or "").splitlines()[-15:])
-
-            r128_match = re.search(r'\{.*?\}', r128_log, re.S)
-            r128_matches = re.findall(r'\{.*?\}', r128_log, re.S) if not r128_match else None
-            r128_json_text = r128_match.group(0) if r128_match else (r128_matches[0] if r128_matches else None)
-
-            r128_track_gain = None
-
-            r128_data: dict | None = None
-            
-            if r128_json_text:
-                try:
-                    r128_data = json.loads(r128_json_text)
-                except json.JSONDecodeError:
-                    if r128_matches:
-                        try:
-                            r128_data = json.loads(r128_matches[-1])
-                        except Exception:
-                            r128_data = None
-
-            r128_input_i = r128_data.get('input_i') if r128_data else None
-
-            r128_input_i_val = None
-            try:
-                if r128_input_i is not None:
-                    r128_input_i_val = int(r128_input_i)
-            except (TypeError, ValueError):
-                r128_input_i_val = None
-
-            if r128_input_i_val is not None and math.isfinite(r128_input_i_val):
-                r128_gain_db = -23 - r128_input_i_val
-                r128_track_gain = int(round(r128_gain_db * 256))
-                
-                if r128_track_gain < -32768:
-                    r128_track_gain = -32768
-                elif r128_track_gain > 32767:
-                    r128_track_gain = 32767
-            
-            result["r128_track_gain"] = r128_track_gain
-            
-            return result
-            
-        except Exception as e:
-            log.error(f"Error calculating track loudness: {e}")
-            return {}
-
-    def calculate_album_loudness(self, album_track_files: List[str]) -> Dict:
+    @staticmethod
+    def _read_json(path: str) -> Optional[Dict]:
         try:
-            if len(album_track_files) == 0:
-                return {}
-            elif len(album_track_files) == 1:
-                return {}
-            
-            ffmpeg_path = config.setting["acousticbrainz_ng_ffmpeg_path"]
-            if not ffmpeg_path:
-                raise ValueError("FFmpeg path not configured")
-            
-            album_track_files.sort()
-            
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as concat_file:
-                for audio_file in album_track_files:
-                    escaped_file = audio_file.replace("'", "'\\''")
-                    concat_file.write(f"file '{escaped_file}'\n")
-                concat_file_path = concat_file.name
-            
-            try:
-                album_replaygain_proc = subprocess.run(
-                    [ffmpeg_path, "-hide_banner", "-f", "concat", "-safe", "0", "-i", concat_file_path, 
-                     "-vn", "-af", f"loudnorm=I={config.setting['acousticbrainz_ng_replaygain_reference_loudness']}:print_format=json", "-f", "null", "-"],
-                    capture_output=True,
-                    text=True,
-                    env=ENV,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                )
-                
-                if album_replaygain_proc.returncode != 0:
-                    log.error(f"FFmpeg failed for album ReplayGain calculation on {len(album_track_files)} files with exit code {album_replaygain_proc.returncode}")
-                    log.error(f"Album files: {', '.join(album_track_files)}")
-                    if album_replaygain_proc.stdout:
-                        log.error(f"FFmpeg stdout: {album_replaygain_proc.stdout}")
-                    if album_replaygain_proc.stderr:
-                        log.error(f"FFmpeg stderr: {album_replaygain_proc.stderr}")
-                    return {}
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
 
-                album_replaygain_log = album_replaygain_proc.stderr or album_replaygain_proc.stdout
+    @staticmethod
+    def _write_json(path: str, data: Dict) -> None:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
 
-                album_replaygain_match = re.search(r'\{.*?\}', album_replaygain_log, re.S)
-                album_replaygain_matches = re.findall(r'\{.*?\}', album_replaygain_log, re.S) if not album_replaygain_match else None
-                album_replaygain_json_text = album_replaygain_match.group(0) if album_replaygain_match else (album_replaygain_matches[0] if album_replaygain_matches else None)
+    def _album_lock(self, path: str) -> threading.Lock:
+        with self._album_locks_lock:
+            return self._album_locks.setdefault(path, threading.Lock())
 
-                album_gain = None
-                album_peak = None
-                album_range = None
-                
-                loudnorm_data: dict | None = None
-                
-                if album_replaygain_json_text:
-                    try:
-                        loudnorm_data = json.loads(album_replaygain_json_text)
-                    except json.JSONDecodeError:
-                        if album_replaygain_matches:
-                            try:
-                                loudnorm_data = json.loads(album_replaygain_matches[-1])
-                            except Exception:
-                                loudnorm_data = None
-                
-                input_i = loudnorm_data.get('input_i') if loudnorm_data else None
-                input_tp = loudnorm_data.get('input_tp') if loudnorm_data else None
-                input_lra = loudnorm_data.get('input_lra') if loudnorm_data else None
-                
-                try:
-                    if input_i:
-                        input_i_val = float(input_i)
-                except (TypeError, ValueError):
-                    input_i_val = None
-                
-                try:
-                    if input_tp:
-                        input_tp_val = float(input_tp)
-                except (TypeError, ValueError):
-                    input_tp_val = None
-                
-                try:
-                    if input_lra:
-                        input_lra_val = float(input_lra)
-                except (TypeError, ValueError):
-                    input_lra_val = None
-
-                if input_i_val is not None and math.isfinite(input_i_val):
-                    album_gain = f"{(config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18) - input_i_val:.2f}"
-
-                if input_tp_val is not None and math.isfinite(input_tp_val):
-                    album_peak = f"{10 ** (input_tp_val / 20):.6f}"
-
-                if input_lra_val is not None and math.isfinite(input_lra_val):
-                    album_range = f"{input_lra_val:.2f}"
-
-                result: Dict = {
-                    "replaygain_album_gain": album_gain,
-                    "replaygain_album_peak": album_peak,
-                    "replaygain_album_range": album_range
-                }
-                
-                album_r128_proc = subprocess.run(
-                    [ffmpeg_path, "-hide_banner", "-f", "concat", "-safe", "0", "-i", concat_file_path,
-                     "-vn", "-af", "loudnorm=I=-23:print_format=json", "-f", "null", "-"],
-                    capture_output=True,
-                    text=True,
-                    env=ENV,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                )
-                
-                if album_r128_proc.returncode != 0:
-                    log.error(f"FFmpeg failed for album R128 calculation on {len(album_track_files)} files with exit code {album_r128_proc.returncode}")
-                    log.error(f"Album files: {', '.join(album_track_files)}")
-                    if album_r128_proc.stdout:
-                        log.error(f"FFmpeg stdout: {album_r128_proc.stdout}")
-                    if album_r128_proc.stderr:
-                        log.error(f"FFmpeg stderr: {album_r128_proc.stderr}")
-                    return result
-
-                album_r128_log = album_r128_proc.stderr or album_r128_proc.stdout
-                
-                album_r128_match = re.search(r'\{.*?\}', album_r128_log, re.S)
-                album_r128_matches = re.findall(r'\{.*?\}', album_r128_log, re.S) if not album_r128_match else None
-                album_r128_json_text = album_r128_match.group(0) if album_r128_match else (album_r128_matches[0] if album_r128_matches else None)
-                
-                r128_album_gain = None
-                
-                r128_data: dict | None = None
-                
-                if album_r128_json_text:
-                    try:
-                        r128_data = json.loads(album_r128_json_text)
-                    except json.JSONDecodeError:
-                        if album_r128_matches:
-                            try:
-                                r128_data = json.loads(album_r128_matches[-1])
-                            except Exception:
-                                r128_data = None
-                
-                r128_input_i = r128_data.get('input_i') if r128_data else None
-                
-                try:
-                    if r128_input_i:
-                        r128_input_i_val = int(r128_input_i)
-                except (TypeError, ValueError):
-                    r128_input_i_val = None
-
-                if r128_input_i_val is not None and math.isfinite(r128_input_i_val):
-                    r128_gain_db = -23 - r128_input_i_val
-                    r128_album_gain = int(round(r128_gain_db * 256))
-                    
-                    if r128_album_gain < -32768:
-                        r128_album_gain = -32768
-                    elif r128_album_gain > 32767:
-                        r128_album_gain = 32767
-
-                result["r128_album_gain"] = r128_album_gain
-                
-                return result
-            
-            finally:
-                os.unlink(concat_file_path)
-                
-        except Exception as e:
-            log.error(f"Error calculating album loudness: {e}")
-            return {}
-
-    def calculate_loudness(self, metadata: Dict, file_path: str, album: Optional[Album] = None) -> bool:
+    def calculate_loudness(self, settings: Settings, file_path: str, cache_folder: str, album: Optional[AlbumJob], tags: Dict[str, Any]) -> bool:
         try:
-            cache_folder = self._generate_cache_folder(metadata, file_path)
-            loudness_file = os.path.join(cache_folder, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
+            track_file = os.path.join(cache_folder, TRACK_LOUDNESS_FILE)
+            track_measurement = self._read_json(track_file)
+            if track_measurement is None:
+                track_measurement = self._measure_loudness(settings, ["-i", file_path, "-vn", "-sn", "-af", "loudnorm=print_format=json"], file_path)
+                if track_measurement is None:
+                    self.log.error("Failed to calculate track loudness")
+                    return False
+                self._write_json(track_file, track_measurement)
 
-            if os.path.exists(loudness_file):
+            is_opus = self._is_opus_file(file_path)
+            tags.update(self._loudness_tags(settings, track_measurement, "track", is_opus))
+            tags["replaygain_reference_loudness"] = f"{settings.replaygain_reference_loudness:.2f} LUFS"
+
+            if album is None:
                 return True
 
-            track_loudness = self.calculate_track_loudness(file_path)
-            
-            if not track_loudness:
-                log.error("Failed to calculate track loudness")
-                return False
-
-            album_loudness = {}
-            if album is not None:
-                release_mbid_folder = os.path.dirname(cache_folder)
-                album_data_file = os.path.join(release_mbid_folder, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
-
-                if not os.path.exists(album_data_file):
-                    album_track_files = []
-                    
-                    for track in album.tracks:
-                        for file in track.files:
-                            album_track_files.append(file.filename)
-                    
-                    if len(album_track_files) == 1:
-                        album_loudness = {
-                            "replaygain_album_gain": track_loudness.get("replaygain_track_gain"),
-                            "replaygain_album_peak": track_loudness.get("replaygain_track_peak"),
-                            "replaygain_album_range": track_loudness.get("replaygain_track_range")
-                        }
-                        if track_loudness.get("r128_track_gain") is not None:
-                            album_loudness["r128_album_gain"] = track_loudness.get("r128_track_gain")
+            if len(album.files) == 1:
+                album_measurement = track_measurement
+            else:
+                # The album loudness is shared between all of its tracks, make
+                # sure concurrent analyses of the same album only compute it once
+                album_file = os.path.join(os.path.dirname(cache_folder), ALBUM_LOUDNESS_FILE)
+                with self._album_lock(album_file):
+                    album_data = self._read_json(album_file)
+                    if album_data is not None and album_data.get("key") == album.key:
+                        album_measurement = album_data.get("measurement") or {}
                     else:
-                        album_loudness = self.calculate_album_loudness(album_track_files)
-                        if not album_loudness:
-                            log.error("Failed to calculate album loudness")
+                        album_measurement = self._measure_album_loudness(settings, album.files)
+                        if album_measurement is None:
+                            self.log.error("Failed to calculate album loudness")
+                            return False
+                        self._write_json(album_file, {"key": album.key, "measurement": album_measurement})
 
-                    album_data = {
-                        "track_count": len(album_track_files),
-                        **album_loudness
-                    }
-
-                    with open(album_data_file, 'w', encoding='utf-8') as f:
-                        json.dump(album_data, f, indent=2)
-                else:
-                    try:
-                        with open(album_data_file, 'r', encoding='utf-8') as f:
-                            album_data = json.load(f)
-                            album_loudness = {
-                                "replaygain_album_gain": album_data.get('replaygain_album_gain'),
-                                "replaygain_album_peak": album_data.get('replaygain_album_peak'),
-                                "replaygain_album_range": album_data.get('replaygain_album_range')
-                            }
-                            
-                            if album_data.get('r128_album_gain') is not None:
-                                album_loudness["r128_album_gain"] = album_data.get('r128_album_gain')
-                    except (FileNotFoundError, json.JSONDecodeError) as e:
-                        log.error(f"Error reading album data file: {e}")
-
-            loudness_data = {
-                **track_loudness,
-                **album_loudness
-            }
-            
-            with open(loudness_file, 'w', encoding='utf-8') as f:
-                json.dump(loudness_data, f, indent=2)
-            
+            tags.update(self._loudness_tags(settings, album_measurement, "album", is_opus))
             return True
+        except AnalysisCancelled:
+            raise
         except Exception as e:
-            log.error(f"Error calculating loudness: {e}")
+            self.log.error(f"Error calculating loudness: {e}")
             return False
-    
-    def parse_loudness(self, metadata: Dict, file: str) -> bool:
+
+    @staticmethod
+    def _loudness_tags(settings: Settings, measurement: Dict[str, float], scope: str, is_opus: bool) -> Dict[str, Any]:
+        tags: Dict[str, Any] = {}
+        input_i = measurement.get("input_i")
+        input_tp = measurement.get("input_tp")
+        input_lra = measurement.get("input_lra")
+
+        if input_i is not None:
+            tags[f"replaygain_{scope}_gain"] = f"{settings.replaygain_reference_loudness - input_i:.2f} dB"
+        if input_tp is not None:
+            tags[f"replaygain_{scope}_peak"] = f"{10 ** (input_tp / 20):.6f}"
+        if input_lra is not None:
+            tags[f"replaygain_{scope}_range"] = f"{input_lra:.2f} dB"
+        if is_opus and input_i is not None:
+            # R128 gains are relative to -23 LUFS, stored as Q7.8 fixed point
+            tags[f"r128_{scope}_gain"] = max(-32768, min(32767, int(round((-23 - input_i) * 256))))
+
+        return tags
+
+    def analyze_track(self, settings: Settings, jobs: List[FileJob], album: Optional[AlbumJob]) -> TrackResult:
+        results = TrackResult([])
         try:
-            output_path = self._generate_cache_folder(metadata, file)
-            if not output_path:
-                log.error("Failed to generate cache folder path")
-                return False
+            for job in jobs:
+                result = FileResult(job.file)
+                results.files.append(result)
+                try:
+                    self._analyze_file(settings, job, album, result)
+                except AnalysisCancelled:
+                    raise
+                except Exception as e:
+                    error_msg = f"Unexpected error analyzing {job.filename}: {str(e)}"
+                    self.log.error(error_msg)
+                    result.errors.append(error_msg)
+        except AnalysisCancelled:
+            results.cancelled = True
+        return results
+
+    def _analyze_file(self, settings: Settings, job: FileJob, album: Optional[AlbumJob], result: FileResult) -> None:
+        def error(message: str) -> None:
+            self.log.error(message)
+            result.errors.append(message)
+
+        try:
+            cache_folder = self._generate_cache_folder(settings, job.metadata, job.filename)
+        except AnalysisCancelled:
+            raise
         except Exception as e:
-            log.error(f"Error generating cache folder: {e}")
-            return False
+            error(f"Error generating cache folder for {job.filename}: {e}")
+            return
 
-        loudness_file = os.path.join(output_path, f"loudness_{config.setting['acousticbrainz_ng_replaygain_reference_loudness'] or -18}.json")
-        if not os.path.exists(loudness_file):
-            log.error(f"Loudness file not found: {loudness_file}")
-            return False
-        
-        loudness_data = {}
-        
-        try:
-            with open(loudness_file, 'r', encoding='utf-8') as f:
-                loudness_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            log.error(f"Error reading loudness file: {e}")
-            return False
+        with ProcessingFile(self, settings, job.filename) as source:
+            if not self.analyze_required(settings, source, cache_folder) or not self.parse_required(settings, cache_folder, result.tags):
+                error(f"Failed to analyze required models for {job.filename}")
+                return
 
-        try:
-            is_opus = self._is_opus_file(file)
+            if settings.analyze_optional:
+                if not self.analyze_optional(settings, source, cache_folder) or not self.parse_optional(settings, cache_folder, result.tags):
+                    error(f"Failed to analyze optional models for {job.filename}")
 
-            replaygain_track_gain = loudness_data.get("replaygain_track_gain")
-            if replaygain_track_gain is not None:
-                metadata["replaygain_track_gain"] = f"{replaygain_track_gain} dB"
-            
-            replaygain_track_peak = loudness_data.get("replaygain_track_peak")
-            if replaygain_track_peak is not None:
-                metadata["replaygain_track_peak"] = replaygain_track_peak
-            
-            replaygain_track_range = loudness_data.get("replaygain_track_range")
-            if replaygain_track_range is not None:
-                metadata["replaygain_track_range"] = f"{replaygain_track_range} dB"
-            
-            replaygain_album_gain = loudness_data.get("replaygain_album_gain")
-            if replaygain_album_gain is not None:
-                metadata["replaygain_album_gain"] = f"{replaygain_album_gain} dB"
-            
-            replaygain_album_peak = loudness_data.get("replaygain_album_peak")
-            if replaygain_album_peak is not None:
-                metadata["replaygain_album_peak"] = replaygain_album_peak
-            
-            replaygain_album_range = loudness_data.get("replaygain_album_range")
-            if replaygain_album_range is not None:
-                metadata["replaygain_album_range"] = f"{replaygain_album_range} dB"
-            
-            replaygain_reference_loudness = loudness_data.get("replaygain_reference_loudness")
-            if replaygain_reference_loudness is not None:
-                metadata["replaygain_reference_loudness"] = f"{replaygain_reference_loudness} LUFS"
-            
-            if is_opus:
-                r128_track_gain = loudness_data.get("r128_track_gain")
-                if r128_track_gain is not None:
-                    metadata["r128_track_gain"] = r128_track_gain
-                
-                r128_album_gain = loudness_data.get("r128_album_gain")
-                if r128_album_gain is not None:
-                    metadata["r128_album_gain"] = r128_album_gain
+        if settings.calculate_replaygain:
+            if not self.calculate_loudness(settings, job.filename, cache_folder, album, result.tags):
+                error(f"Failed to calculate loudness for {job.filename}")
 
-            return True
-        except Exception as e:
-            log.error(f"Error parsing loudness data: {e}")
-            return False
+        if settings.save_fingerprint:
+            result.fingerprint = self.build_fingerprint(settings, cache_folder)
+            if result.fingerprint is None:
+                error(f"Failed to save fingerprint for {job.filename}")
 
-acousticbrainz_ng = AcousticBrainzNG()
+        result.processed = True
 
-def analyze_track(track: Track, album: Optional[Album] = None) -> Dict:
-    results = {
-        'track': track,
-        'album': album,
-        'success': True,
-        'errors': [],
-        'files_processed': 0
-    }
-
-    semaphore = _get_analysis_semaphore()
-    semaphore.acquire()
-    
-    try:
-        for file in track.files:
+    def delete_cache(self, settings: Settings, jobs: List[Tuple[FileJob, bool]]) -> None:
+        for job, delete_album in jobs:
             try:
-                ar_result = acousticbrainz_ng.analyze_required(file.metadata, file.filename)
-                pr_result = acousticbrainz_ng.parse_required(file.metadata, file.filename)
-
-                if not ar_result or not pr_result:
-                    error_msg = f"Failed to analyze required models for {file.filename}"
-                    log.error(error_msg)
-                    results['errors'].append(error_msg)
-                    results['success'] = False
-                    continue
-
-                if config.setting["acousticbrainz_ng_analyze_optional"]:
-                    ao_result = acousticbrainz_ng.analyze_optional(file.metadata, file.filename)
-                    ap_result = acousticbrainz_ng.parse_optional(file.metadata, file.filename)
-                    
-                    if not ao_result or not ap_result:
-                        error_msg = f"Failed to analyze optional models for {file.filename}"
-                        log.error(error_msg)
-                        results['errors'].append(error_msg)
-                        
-                if config.setting["acousticbrainz_ng_calculate_replaygain"]:
-                    cl_result = acousticbrainz_ng.calculate_loudness(file.metadata, file.filename, album)
-                    pl_result = acousticbrainz_ng.parse_loudness(file.metadata, file.filename)
-                    
-                    if not cl_result or not pl_result:
-                        error_msg = f"Failed to calculate loudness for {file.filename}"
-                        log.error(error_msg)
-                        results['errors'].append(error_msg)
-
-                if config.setting["acousticbrainz_ng_save_fingerprint"]:
-                    sf_result = acousticbrainz_ng.save_fingerprint(file.metadata, file.filename, file)
-                    if not sf_result:
-                        error_msg = f"Failed to save fingerprint for {file.filename}"
-                        log.error(error_msg)
-                        results['errors'].append(error_msg)
-                    else:
-                        file.metadata_images_changed.emit()
-
-                results['files_processed'] += 1
-
+                cache_folder = self._generate_cache_folder(settings, job.metadata, job.filename, create=False)
+                if os.path.exists(cache_folder):
+                    shutil.rmtree(cache_folder)
+                    self.log.debug(f"Deleted cache folder: {cache_folder}")
+                album_file = os.path.join(os.path.dirname(cache_folder), ALBUM_LOUDNESS_FILE)
+                if delete_album and os.path.exists(album_file):
+                    os.remove(album_file)
+                    self.log.debug(f"Deleted album loudness cache: {album_file}")
             except Exception as e:
-                error_msg = f"Unexpected error analyzing {file.filename}: {str(e)}"
-                log.error(error_msg)
-                results['errors'].append(error_msg)
-                results['success'] = False
-    finally:
-        semaphore.release()
+                self.log.error(f"Error deleting cache for {job.filename}: {e}")
 
-    return results
 
-class AcousticBrainzNGAction(BaseAction):
-    NAME = f"[{PLUGIN_NAME}] Analyze"
-    
-    def __init__(self):
-        super().__init__()
-        self.num_tracks = 0
+def _fingerprint_png(values: List[float]) -> bytes:
+    # 95 values plus a 5 value checksum, rendered as an inverted 10x10 grayscale image
+    clipped = [min(max(value, 0.0), 1.0) for value in values]
+
+    buf = hashlib.sha256(struct.pack(f"<{len(clipped)}H", *(int(value * 65535) for value in clipped))).digest()
+    while len(buf) < 5 * 4:
+        buf += hashlib.sha256(buf).digest()
+    checksum = [struct.unpack(">I", buf[i * 4:i * 4 + 4])[0] / 0xFFFFFFFF for i in range(5)]
+
+    pixels = bytes(255 - round(value * 255) for value in clipped + checksum)
+    width = height = 10
+
+    def _chunk(c_type, data):
+        chunk = struct.pack(">I", len(data)) + c_type + data
+        crc = zlib.crc32(c_type + data) & 0xFFFFFFFF
+        return chunk + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB",
+                       width, height,
+                       8,    # bit depth
+                       0,    # color type = 0 (grayscale)
+                       0,    # compression
+                       0,    # filter
+                       0)    # interlace
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        raw.extend(pixels[y * width:(y + 1) * width])
+
+    return (
+        b'\x89PNG\r\n\x1a\n'
+        + _chunk(b'IHDR', ihdr)
+        + _chunk(b'IDAT', zlib.compress(bytes(raw), level=9))
+        + _chunk(b'IEND', b'')
+    )
+
+
+_plugin: Optional[AcousticBrainzNG] = None
+
+
+def _collect_tracks(objs) -> List[Tuple[Track, Optional[Album]]]:
+    # Albums are collected first so that a track selected together with its
+    # album gets album loudness. The non-album tracks "album" is a subclass of
+    # Album but must not be treated as an album
+    tracks: Dict[int, Tuple[Track, Optional[Album]]] = {}
+    for item in objs:
+        if isinstance(item, Album):
+            album = item if type(item) is Album else None
+            for track in item.tracks:
+                tracks.setdefault(id(track), (track, album))
+    for item in objs:
+        if isinstance(item, Track):
+            tracks.setdefault(id(item), (item, None))
+    return list(tracks.values())
+
+
+def _file_job(file) -> FileJob:
+    return FileJob(
+        file=file,
+        filename=file.filename,
+        metadata={
+            name: file.metadata.get(name)
+            for name in ('musicbrainz_albumartistid', 'musicbrainz_releasegroupid', 'musicbrainz_albumid', 'musicbrainz_recordingid')
+        },
+    )
+
+
+def _album_job(album: Album) -> AlbumJob:
+    files = []
+    key = []
+    for track in album.tracks:
+        for file in track.files:
+            files.append(file.filename)
+            key.append(file.metadata.get('musicbrainz_recordingid') or file.filename)
+    return AlbumJob(files=files, key=sorted(key))
+
+
+def _set_statusbar_message(api: PluginApi, message: str, *args) -> None:
+    api.tagger.window.set_statusbar_message(message, *args, translate=None)
+
+
+class AnalysisBatch:
+    def __init__(self, num_tracks: int):
+        self.num_tracks = num_tracks
         self.current = 0
 
-    def _format_progress(self):
+    def format_progress(self) -> str:
         if self.num_tracks <= 1:
             return ""
-        else:
-            self.current += 1
-            return f" ({self.current}/{self.num_tracks})"
+        self.current += 1
+        return f" ({self.current}/{self.num_tracks})"
 
-    def _analysis_callback(self, result=None, error=None):
-        progress = self._format_progress()
-        
-        if error is None and result:
-            track = result['track']
-            album = result['album']
-            
-            for file in track.files:
-                file.update()
-            track.update()
-            if album:
-                album.update()
-            
-            if result['success'] and not result['errors']:
-                if album:
-                    album_name = album.metadata.get('album', 'Unknown Album')
-                    track_name = track.metadata.get('title', 'Unknown Track')
-                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
-                        'Successfully analyzed "%s" from "%s"%s.', track_name, album_name, progress
-                    )
-                else:
-                    track_name = track.metadata.get('title', 'Unknown Track')
-                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
-                        'Successfully analyzed "%s"%s.', track_name, progress
-                    )
-            else:
-                track_name = track.metadata.get('title', 'Unknown Track')
-                if result['files_processed'] > 0:
-                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
-                        'Partially analyzed "%s" with warnings%s.', track_name, progress
-                    )
-                else:
-                    self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
-                        'Failed to analyze "%s"%s.', track_name, progress
-                    )
-        else:
-            track_name = "Unknown Track"
-            if result and result.get('track'):
-                track_name = result['track'].metadata.get('title', 'Unknown Track')
-            
-            error_msg = str(error) if error else "Unknown error"
-            log.error(f"Analysis failed for {track_name}: {error_msg}")
-            self.tagger.window.set_statusbar_message( # pyright: ignore[reportAttributeAccessIssue]
-                'Failed to analyze "%s"%s.', track_name, progress
-            )
+
+class AcousticBrainzNGAction(BaseAction):
+    TITLE = "Analyze"
+    MENU = (PLUGIN_NAME,)
 
     def callback(self, objs):
-        tracks_and_albums = [t for t in objs if isinstance(t, Track) or isinstance(t, Album)]
-        
-        if not tracks_and_albums:
+        plugin = _plugin
+        if plugin is None:
             return
-        
-        total_files = 0
+
         tracks_to_process = []
-        
-        for item in tracks_and_albums:
-            if isinstance(item, Track):
-                total_files += len(item.files)
-                tracks_to_process.append((item, None))
-            elif isinstance(item, Album):
-                for track in item.tracks:
-                    total_files += len(track.files)
-                    tracks_to_process.append((track, item))
-        
+        album_jobs: Dict[int, AlbumJob] = {}
+        total_files = 0
+
+        for track, album in _collect_tracks(objs):
+            files = [file for file in track.files if file.filename not in plugin.in_flight]
+            if not files:
+                continue
+            if album is not None and id(album) not in album_jobs:
+                album_jobs[id(album)] = _album_job(album)
+            total_files += len(files)
+            tracks_to_process.append((track, album, files))
+
         if not tracks_to_process:
             return
-        
-        self.num_tracks = len(tracks_to_process)
-        self.current = 0
-        
-        if self.num_tracks == 1:
-            track, album = tracks_to_process[0]
-            track_name = track.metadata.get('title', 'Unknown Track')
-            self.tagger.window.set_statusbar_message('Analyzing "%s" with %s...', track_name, PLUGIN_NAME) # pyright: ignore[reportAttributeAccessIssue]
-        else:
-            self.tagger.window.set_statusbar_message('Analyzing %i tracks with %s...', self.num_tracks, PLUGIN_NAME) # pyright: ignore[reportAttributeAccessIssue]
-        
-        log.debug(f"Analyzing {total_files} files from {self.num_tracks} tracks with {PLUGIN_NAME}")
 
-        for track, album in tracks_to_process:
+        settings = plugin.settings()
+        plugin.pool.setMaxThreadCount(settings.max_concurrent_analyses)
+        batch = AnalysisBatch(len(tracks_to_process))
+
+        if batch.num_tracks == 1:
+            track_name = tracks_to_process[0][0].metadata.get('title', 'Unknown Track')
+            _set_statusbar_message(self.api, 'Analyzing "%s" with %s...', track_name, PLUGIN_NAME)
+        else:
+            _set_statusbar_message(self.api, 'Analyzing %i tracks with %s...', batch.num_tracks, PLUGIN_NAME)
+
+        self.api.logger.debug(f"Analyzing {total_files} files from {batch.num_tracks} tracks with {PLUGIN_NAME}")
+
+        for track, album, files in tracks_to_process:
+            plugin.in_flight.update(file.filename for file in files)
             thread.run_task(
-                partial(analyze_track, track, album),
-                self._analysis_callback
+                partial(plugin.analyze_track, settings, [_file_job(file) for file in files], album_jobs[id(album)] if album else None),
+                partial(_analysis_callback, plugin, batch, track, album, files),
+                thread_pool=plugin.pool,
             )
 
+
+def _apply_file_result(result: FileResult) -> None:
+    file = result.file
+    if file.state == file.State.REMOVED:
+        return
+
+    for name, value in result.tags.items():
+        file.metadata[name] = value
+
+    if result.fingerprint is not None:
+        data, path = result.fingerprint
+        images = file.metadata.images
+        for i in reversed(range(len(images))):
+            if images[i].comment == FINGERPRINT_COMMENT:
+                del images[i]
+        images.append(CoverArtImage(
+            url=QtCore.QUrl.fromLocalFile(path),
+            data=data,
+            comment=FINGERPRINT_COMMENT,
+            types=['other'],
+            support_types=True,
+        ))
+        file.metadata_images_changed.emit()
+
+    file.update()
+
+
+def _analysis_callback(plugin: AcousticBrainzNG, batch: AnalysisBatch, track: Track, album: Optional[Album], files: list, result: Optional[TrackResult] = None, error=None):
+    for file in files:
+        plugin.in_flight.discard(file.filename)
+
+    if result is not None and result.cancelled:
+        return
+
+    api = plugin.api
+    progress = batch.format_progress()
+    track_name = track.metadata.get('title', 'Unknown Track')
+
+    if error is None and result:
+        for file_result in result.files:
+            _apply_file_result(file_result)
+        track.update()
+        if album:
+            album.update()
+
+        processed = sum(1 for file_result in result.files if file_result.processed)
+        has_errors = any(file_result.errors for file_result in result.files)
+
+        if processed == len(result.files) and not has_errors:
+            if album:
+                album_name = album.metadata.get('album', 'Unknown Album')
+                _set_statusbar_message(api, 'Successfully analyzed "%s" from "%s"%s.', track_name, album_name, progress)
+            else:
+                _set_statusbar_message(api, 'Successfully analyzed "%s"%s.', track_name, progress)
+        elif processed > 0:
+            _set_statusbar_message(api, 'Partially analyzed "%s" with warnings%s.', track_name, progress)
+        else:
+            _set_statusbar_message(api, 'Failed to analyze "%s"%s.', track_name, progress)
+    else:
+        error_msg = str(error) if error else "Unknown error"
+        api.logger.error(f"Analysis failed for {track_name}: {error_msg}")
+        _set_statusbar_message(api, 'Failed to analyze "%s"%s.', track_name, progress)
+
+
 class AcousticBrainzNGDeleteCacheAction(BaseAction):
-    NAME = f"[{PLUGIN_NAME}] Delete cache"
-    
-    def __init__(self):
-        super().__init__()
-    
+    TITLE = "Delete cache"
+    MENU = (PLUGIN_NAME,)
+
     def callback(self, objs):
-        tracks_and_albums = [t for t in objs if isinstance(t, Track) or isinstance(t, Album)]
-        
-        if not tracks_and_albums:
+        plugin = _plugin
+        if plugin is None:
             return
-        
-        total_files = 0
-        tracks_to_process = []
-        
-        for item in tracks_and_albums:
-            if isinstance(item, Track):
-                total_files += len(item.files)
-                tracks_to_process.append((item, None))
-            elif isinstance(item, Album):
-                for track in item.tracks:
-                    total_files += len(track.files)
-                    tracks_to_process.append((track, item))
-        
+
+        tracks_to_process = _collect_tracks(objs)
         if not tracks_to_process:
             return
 
         num_tracks = len(tracks_to_process)
-        current = 0
-        
+
         if num_tracks == 1:
-            track, album = tracks_to_process[0]
-            track_name = track.metadata.get('title', 'Unknown Track')
-            self.tagger.window.set_statusbar_message('Deleting %s cache for "%s"...', PLUGIN_NAME, track_name) # pyright: ignore[reportAttributeAccessIssue]
+            track_name = tracks_to_process[0][0].metadata.get('title', 'Unknown Track')
+            _set_statusbar_message(self.api, 'Deleting %s cache for "%s"...', PLUGIN_NAME, track_name)
         else:
-            self.tagger.window.set_statusbar_message('Deleting %s cache for %i tracks...', PLUGIN_NAME, num_tracks) # pyright: ignore[reportAttributeAccessIssue]
-        
-        log.debug(f"Deleting {PLUGIN_NAME} cache for {total_files} files from {num_tracks} tracks")
-        
-        for track, album in tracks_to_process:
-            current += 1
-            progress = f" ({current}/{num_tracks})" if num_tracks > 1 else ""
-            for file in track.files:
-                try:
-                    cache_folder = acousticbrainz_ng._generate_cache_folder(file.metadata, file.filename)
-                    if os.path.exists(cache_folder):
-                        shutil.rmtree(cache_folder)
-                        log.debug(f"Deleted cache folder: {cache_folder}")
-                except Exception as e:
-                    log.error(f"Error deleting cache for {file.filename}: {e}")
-            track.update()
-            if album:
-                album.update()
-            track_name = track.metadata.get('title', 'Unknown Track')
-            self.tagger.window.set_statusbar_message('Deleted %s cache for "%s"%s.', PLUGIN_NAME, track_name, progress) # pyright: ignore[reportAttributeAccessIssue]
+            _set_statusbar_message(self.api, 'Deleting %s cache for %i tracks...', PLUGIN_NAME, num_tracks)
+
+        jobs = [(_file_job(file), album is not None) for track, album in tracks_to_process for file in track.files]
+
+        self.api.logger.debug(f"Deleting {PLUGIN_NAME} cache for {len(jobs)} files from {num_tracks} tracks")
+
+        def done(result=None, error=None):
+            if num_tracks == 1:
+                track_name = tracks_to_process[0][0].metadata.get('title', 'Unknown Track')
+                _set_statusbar_message(self.api, 'Deleted %s cache for "%s".', PLUGIN_NAME, track_name)
+            else:
+                _set_statusbar_message(self.api, 'Deleted %s cache for %i tracks.', PLUGIN_NAME, num_tracks)
+
+        # Computing the cache folder of a file without a recording MBID decodes
+        # the whole file, keep that off the main thread
+        thread.run_task(partial(plugin.delete_cache, plugin.settings(), jobs), done)
+
 
 class AcousticBrainzNGOptionsPage(OptionsPage):
     NAME = "acousticbrainz_ng"
-    TITLE = "AcousticBrainz-ng"
+    TITLE = PLUGIN_NAME
     PARENT = "plugins"
-    
-    options = CONFIG_OPTIONS
-    
+
+    # Registers the options so "Restore defaults" works for this page
+    OPTIONS = {name: {} for name, _default, _bounds in PLUGIN_OPTIONS}
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setup_ui()
 
     def _create_path_input_layout(self, line_edit: QtWidgets.QLineEdit, browse_callback, check_callback=None) -> QtWidgets.QHBoxLayout:
         layout = QtWidgets.QHBoxLayout()
-        
+
         browse_button = QtWidgets.QPushButton("Browse", self)
         browse_button.clicked.connect(browse_callback)
         layout.addWidget(line_edit)
         layout.addWidget(browse_button)
-        
+
         if check_callback:
             check_button = QtWidgets.QPushButton("Check", self)
             check_button.clicked.connect(check_callback)
             layout.addWidget(check_button)
-        
+
         return layout
-    
+
+    def _path_line_edit(self, name: str, description: str) -> QtWidgets.QLineEdit:
+        line_edit = QtWidgets.QLineEdit(self)
+        default = _default_path(self.api, name)
+        line_edit.setPlaceholderText(f"{description} (default: {default})" if default else description)
+        line_edit.setToolTip("Leave empty to use the default")
+        return line_edit
+
     def setup_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
-        
+
         options_group = QtWidgets.QGroupBox("Options", self)
-        options_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Minimum)
+        options_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Minimum)
         options_layout = QtWidgets.QVBoxLayout(options_group)
 
         self.analyze_optional_checkbox = QtWidgets.QCheckBox("Analyze optional MusicNN models", self)
@@ -1525,7 +1247,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         self.save_raw_checkbox = QtWidgets.QCheckBox("Save raw values", self)
         self.save_raw_checkbox.setToolTip("Save raw MusicNN numbers in the metadata")
-        
+
         self.calculate_replaygain_checkbox = QtWidgets.QCheckBox("Calculate ReplayGain", self)
         self.calculate_replaygain_checkbox.setToolTip("Calculate ReplayGain values for the track and album")
 
@@ -1537,36 +1259,36 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         musicnn_workers_layout = QtWidgets.QHBoxLayout()
         concurrent_analyses_layout = QtWidgets.QHBoxLayout()
         rg_reference_layout = QtWidgets.QHBoxLayout()
-        
+
         musicnn_workers_label = QtWidgets.QLabel("Max MusicNN processes:", self)
-        musicnn_workers_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        musicnn_workers_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.musicnn_workers_input = QtWidgets.QSpinBox(self)
         self.musicnn_workers_input.setToolTip("Maximum number of concurrent MusicNN processes")
-        self.musicnn_workers_input.setRange(1, max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS)))
-        self.musicnn_workers_input.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
-        
+        self.apply_option_bounds(self.musicnn_workers_input, "max_musicnn_workers")
+        self.musicnn_workers_input.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Preferred)
+
         musicnn_workers_layout.addWidget(musicnn_workers_label)
         musicnn_workers_layout.addStretch()
         musicnn_workers_layout.addWidget(self.musicnn_workers_input)
-        
+
         concurrent_analyses_label = QtWidgets.QLabel("Max concurrent analyses:", self)
-        concurrent_analyses_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        concurrent_analyses_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.concurrent_analyses_input = QtWidgets.QSpinBox(self)
         self.concurrent_analyses_input.setToolTip("Maximum number of tracks analyzed simultaneously")
-        self.concurrent_analyses_input.setRange(1, 8)
-        self.concurrent_analyses_input.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
-        
+        self.apply_option_bounds(self.concurrent_analyses_input, "max_concurrent_analyses")
+        self.concurrent_analyses_input.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Preferred)
+
         concurrent_analyses_layout.addWidget(concurrent_analyses_label)
         concurrent_analyses_layout.addStretch()
         concurrent_analyses_layout.addWidget(self.concurrent_analyses_input)
-        
+
         rg_reference_label = QtWidgets.QLabel("ReplayGain reference loudness (LUFS):", self)
-        rg_reference_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        rg_reference_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.rg_reference_input = QtWidgets.QSpinBox(self)
         self.rg_reference_input.setToolTip("ReplayGain reference loudness in LUFS")
-        self.rg_reference_input.setRange(-30, -5)
-        self.rg_reference_input.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
-        
+        self.apply_option_bounds(self.rg_reference_input, "replaygain_reference_loudness")
+        self.rg_reference_input.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Preferred)
+
         self.calculate_replaygain_checkbox.toggled.connect(self.rg_reference_input.setEnabled)
 
         rg_reference_layout.addWidget(rg_reference_label)
@@ -1579,12 +1301,12 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         options_layout.addWidget(self.calculate_replaygain_checkbox)
         options_layout.addLayout(concurrent_analyses_layout)
         options_layout.addLayout(musicnn_workers_layout)
-        
+
         concurrent_processes_layout = QtWidgets.QHBoxLayout()
         concurrent_processes_label = QtWidgets.QLabel("Max concurrent processes:", self)
-        concurrent_processes_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        concurrent_processes_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.concurrent_processes_display = QtWidgets.QLabel("0", self)
-        self.concurrent_processes_display.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.concurrent_processes_display.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.concurrent_processes_display.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
         concurrent_processes_layout.addWidget(concurrent_processes_label)
@@ -1608,39 +1330,35 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         layout.addWidget(options_group)
 
         paths_group = QtWidgets.QGroupBox("Paths", self)
-        paths_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Minimum)
+        paths_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Minimum)
         paths_layout = QtWidgets.QVBoxLayout(paths_group)
-        
+
         # Binaries path
-        self.binaries_path_input = QtWidgets.QLineEdit(self)
-        self.binaries_path_input.setPlaceholderText("Path to Essentia binaries")
+        self.binaries_path_input = self._path_line_edit("binaries_path", "Path to Essentia binaries")
         binaries_layout = self._create_path_input_layout(
             self.binaries_path_input,
             lambda: self._browse_folder(self.binaries_path_input),
-            lambda: (self._check_binaries(show_success=True), None)[1]
+            lambda: self._check_binaries(show_success=True)
         )
-        
+
         # FFmpeg path
-        self.ffmpeg_path_input = QtWidgets.QLineEdit(self)
-        self.ffmpeg_path_input.setPlaceholderText("Path to FFmpeg")
+        self.ffmpeg_path_input = self._path_line_edit("ffmpeg_path", "Path to FFmpeg")
         ffmpeg_layout = self._create_path_input_layout(
             self.ffmpeg_path_input,
             lambda: self._browse_file(self.ffmpeg_path_input),
-            lambda: (self._check_binaries(show_success=True), None)[1]
+            lambda: self._check_binaries(show_success=True)
         )
 
         # Models path
-        self.models_path_input = QtWidgets.QLineEdit(self)
-        self.models_path_input.setPlaceholderText("Path to MusicNN models")
+        self.models_path_input = self._path_line_edit("models_path", "Path to MusicNN models")
         models_layout = self._create_path_input_layout(
             self.models_path_input,
             lambda: self._browse_folder(self.models_path_input),
-            lambda: (self._check_models(show_success=True, check_optional=True), None)[1]
+            lambda: self._check_models(show_success=True, check_optional=True)
         )
-        
+
         # Cache path
-        self.cache_path_input = QtWidgets.QLineEdit(self)
-        self.cache_path_input.setPlaceholderText("Path to cache directory")
+        self.cache_path_input = self._path_line_edit("cache_path", "Path to cache directory")
         cache_layout = self._create_path_input_layout(
             self.cache_path_input,
             lambda: self._browse_folder(self.cache_path_input)
@@ -1654,9 +1372,9 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         paths_layout.addLayout(models_layout)
         paths_layout.addWidget(QtWidgets.QLabel("Cache", self))
         paths_layout.addLayout(cache_layout)
-        
+
         layout.addWidget(paths_group)
-        
+
         layout.addStretch()
 
     def _update_fingerprint_state(self, checked):
@@ -1665,40 +1383,45 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.save_fingerprint_checkbox.setEnabled(checked)
 
     def _check_binaries(self, show_success=False) -> bool:
-        binaries_path = self.binaries_path_input.text()
+        binaries_path = _resolve_path(self.api, "binaries_path", self.binaries_path_input.text())
         if not binaries_path or not os.path.exists(binaries_path):
             QtWidgets.QMessageBox.warning(self, "Binaries", "Invalid or empty binaries path.")
             return False
-        
-        ffmpeg_path = self.ffmpeg_path_input.text()
+
+        ffmpeg_path = _resolve_path(self.api, "ffmpeg_path", self.ffmpeg_path_input.text())
         if not ffmpeg_path or not os.path.exists(ffmpeg_path):
             QtWidgets.QMessageBox.warning(self, "Binaries", "Invalid or empty FFmpeg path.")
             return False
-        
+
         missing_binaries = []
         for binary in REQUIRED_BINARIES:
-            binary_path = os.path.join(binaries_path, binary)
-            if os.name == 'nt':  # Windows
-                binary_path += '.exe'
-            if not os.path.exists(binary_path):
+            if not os.path.exists(os.path.join(binaries_path, _exe(binary))):
                 missing_binaries.append(binary)
-        
+
         try:
-            result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            result = subprocess.run(
+                [ffmpeg_path, "-version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
             if result.returncode != 0 or "ffmpeg version" not in result.stdout:
                 missing_binaries.append("FFmpeg (invalid executable)")
                 if result.returncode != 0:
-                    log.error(f"FFmpeg version check failed with exit code {result.returncode}")
+                    self.api.logger.error(f"FFmpeg version check failed with exit code {result.returncode}")
                     if result.stdout:
-                        log.error(f"FFmpeg stdout: {result.stdout}")
+                        self.api.logger.error(f"FFmpeg stdout: {result.stdout}")
                     if result.stderr:
-                        log.error(f"FFmpeg stderr: {result.stderr}")
+                        self.api.logger.error(f"FFmpeg stderr: {result.stderr}")
         except Exception as e:
             missing_binaries.append("FFmpeg (unable to execute)")
-            log.error(f"Exception running FFmpeg version check: {e}")
-        
+            self.api.logger.error(f"Exception running FFmpeg version check: {e}")
+
         if missing_binaries:
-            message = f"Missing binaries:\n" + "\n".join(f"• {binary}" for binary in missing_binaries)
+            message = "Missing binaries:\n" + "\n".join(f"• {binary}" for binary in missing_binaries)
             QtWidgets.QMessageBox.warning(self, "Binaries", message)
             return False
         else:
@@ -1707,18 +1430,18 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             return True
 
     def _check_models(self, show_success=False, check_optional=True) -> bool:
-        path = self.models_path_input.text()
+        path = _resolve_path(self.api, "models_path", self.models_path_input.text())
         if not path or not os.path.exists(path):
             QtWidgets.QMessageBox.warning(self, "Models", "Invalid or empty path.")
             return False
-        
+
         missing_required = []
         for model in REQUIRED_MODELS:
             model_path = os.path.join(path, f"{model[0]}.pb")
             metadata_path = os.path.join(path, f"{model[0]}.json")
             if not os.path.exists(model_path) or not os.path.exists(metadata_path):
                 missing_required.append(model[0])
-        
+
         missing_optional = []
         if check_optional:
             for model in OPTIONAL_MODELS:
@@ -1726,31 +1449,31 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
                 metadata_path = os.path.join(path, f"{model[0]}.json")
                 if not os.path.exists(model_path) or not os.path.exists(metadata_path):
                     missing_optional.append(model[0])
-        
+
         if missing_required:
-            message = f"Note: Model JSON metadata required as well\n\nMissing required models:\n" + "\n".join(f"• {model}" for model in missing_required)
+            message = "Note: Model JSON metadata required as well\n\nMissing required models:\n" + "\n".join(f"• {model}" for model in missing_required)
             QtWidgets.QMessageBox.warning(self, "Models", message)
             return False
         elif missing_optional and check_optional:
-            message = f"Note: Model JSON metadata required as well\n\nMissing optional models:\n" + "\n".join(f"• {model}" for model in missing_optional)
+            message = "Note: Model JSON metadata required as well\n\nMissing optional models:\n" + "\n".join(f"• {model}" for model in missing_optional)
             QtWidgets.QMessageBox.information(self, "Models", message)
-        
+
         if show_success:
             if missing_optional and check_optional:
                 QtWidgets.QMessageBox.information(self, "Models", "All required models found! Some optional models are missing.")
             else:
                 QtWidgets.QMessageBox.information(self, "Models", "All models found!")
-        
+
         return True
 
     def _browse_folder(self, line_edit: QtWidgets.QLineEdit) -> None:
-            folder = QtWidgets.QFileDialog.getExistingDirectory(
-                self, "Select Folder",
-                line_edit.text() or os.path.expanduser("~")
-            )
-            if folder:
-                line_edit.setText(folder)
-    
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Folder",
+            line_edit.text() or os.path.expanduser("~")
+        )
+        if folder:
+            line_edit.setText(folder)
+
     def _browse_file(self, line_edit: QtWidgets.QLineEdit) -> None:
         file, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Select File",
@@ -1761,61 +1484,92 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             line_edit.setText(file)
 
     def load(self):
-        self.analyze_optional_checkbox.setChecked(config.setting["acousticbrainz_ng_analyze_optional"] or False)
-        self.save_raw_checkbox.setChecked(config.setting["acousticbrainz_ng_save_raw"] or False)
-        
-        replaygain_setting = config.setting["acousticbrainz_ng_calculate_replaygain"]
-        if replaygain_setting is None:
-            self.calculate_replaygain_checkbox.setChecked(True)
-        else:
-            self.calculate_replaygain_checkbox.setChecked(replaygain_setting)
-        
+        cfg = self.api.plugin_config
+
+        self.analyze_optional_checkbox.setChecked(cfg["analyze_optional"])
+        self.save_raw_checkbox.setChecked(cfg["save_raw"])
+        self.calculate_replaygain_checkbox.setChecked(cfg["calculate_replaygain"])
         self.rg_reference_input.setEnabled(self.calculate_replaygain_checkbox.isChecked())
 
-        fingerprint_setting = config.setting["acousticbrainz_ng_save_fingerprint"]
-        optional_setting = config.setting["acousticbrainz_ng_analyze_optional"] or False
-        
-        if fingerprint_setting is None:
-            self.save_fingerprint_checkbox.setChecked(True if optional_setting else False)
-        else:
-            self.save_fingerprint_checkbox.setChecked(fingerprint_setting if optional_setting else False)
-        
+        optional_setting = cfg["analyze_optional"]
+        self.save_fingerprint_checkbox.setChecked(cfg["save_fingerprint"] and optional_setting)
         self._update_fingerprint_state(optional_setting)
 
-        self.musicnn_workers_input.setValue(config.setting["acousticbrainz_ng_max_musicnn_workers"] or 4)
-        self.concurrent_analyses_input.setValue(config.setting["acousticbrainz_ng_max_concurrent_analyses"] or 2)
-        self.rg_reference_input.setValue(config.setting["acousticbrainz_ng_replaygain_reference_loudness"] or -18)
+        self.musicnn_workers_input.setValue(cfg["max_musicnn_workers"])
+        self.concurrent_analyses_input.setValue(cfg["max_concurrent_analyses"])
+        self.rg_reference_input.setValue(cfg["replaygain_reference_loudness"])
 
-        self.binaries_path_input.setText(config.setting["acousticbrainz_ng_binaries_path"])
-        self.ffmpeg_path_input.setText(config.setting["acousticbrainz_ng_ffmpeg_path"])
-        self.models_path_input.setText(config.setting["acousticbrainz_ng_models_path"])
-        self.cache_path_input.setText(config.setting["acousticbrainz_ng_cache_path"])
-    
+        self.binaries_path_input.setText(cfg["binaries_path"])
+        self.ffmpeg_path_input.setText(cfg["ffmpeg_path"])
+        self.models_path_input.setText(cfg["models_path"])
+        self.cache_path_input.setText(cfg["cache_path"])
+
     def save(self):
         self._check_binaries()
         self._check_models(show_success=False, check_optional=False)
-        
-        config.setting["acousticbrainz_ng_analyze_optional"] = self.analyze_optional_checkbox.isChecked()
-        config.setting["acousticbrainz_ng_save_raw"] = self.save_raw_checkbox.isChecked()
-        config.setting["acousticbrainz_ng_calculate_replaygain"] = self.calculate_replaygain_checkbox.isChecked()
-        config.setting["acousticbrainz_ng_save_fingerprint"] = self.save_fingerprint_checkbox.isChecked()
 
-        max_workers = max(1, min(self.musicnn_workers_input.value(), max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))))
-        config.setting["acousticbrainz_ng_max_musicnn_workers"] = max_workers
-        
-        max_concurrent = max(1, min(self.concurrent_analyses_input.value(), 8))
-        config.setting["acousticbrainz_ng_max_concurrent_analyses"] = max_concurrent
-        
-        rg_reference = max(-30, min(self.rg_reference_input.value(), -5))
-        config.setting["acousticbrainz_ng_replaygain_reference_loudness"] = rg_reference
+        cfg = self.api.plugin_config
 
-        config.setting["acousticbrainz_ng_binaries_path"] = self.binaries_path_input.text()
-        config.setting["acousticbrainz_ng_ffmpeg_path"] = self.ffmpeg_path_input.text()
-        config.setting["acousticbrainz_ng_models_path"] = self.models_path_input.text()
-        config.setting["acousticbrainz_ng_cache_path"] = self.cache_path_input.text()
+        cfg["analyze_optional"] = self.analyze_optional_checkbox.isChecked()
+        cfg["save_raw"] = self.save_raw_checkbox.isChecked()
+        cfg["calculate_replaygain"] = self.calculate_replaygain_checkbox.isChecked()
+        cfg["save_fingerprint"] = self.save_fingerprint_checkbox.isChecked()
 
-register_options_page(AcousticBrainzNGOptionsPage)
-register_track_action(AcousticBrainzNGAction())
-register_album_action(AcousticBrainzNGAction())
-register_track_action(AcousticBrainzNGDeleteCacheAction())
-register_album_action(AcousticBrainzNGDeleteCacheAction())
+        cfg["max_musicnn_workers"] = self.musicnn_workers_input.value()
+        cfg["max_concurrent_analyses"] = self.concurrent_analyses_input.value()
+        cfg["replaygain_reference_loudness"] = self.rg_reference_input.value()
+
+        cfg["binaries_path"] = self.binaries_path_input.text().strip()
+        cfg["ffmpeg_path"] = self.ffmpeg_path_input.text().strip()
+        cfg["models_path"] = self.models_path_input.text().strip()
+        cfg["cache_path"] = self.cache_path_input.text().strip()
+
+
+def _migrate_legacy_settings(api: PluginApi) -> None:
+    # Carry over the settings of the Picard 2 version of this plugin. Paths to
+    # the bundled binaries, models and cache are not migrated, they pointed to
+    # the old plugin install
+    if api.plugin_persist["legacy_settings_migrated"]:
+        return
+
+    setting = api.global_config.setting
+    for name, qtype in LEGACY_OPTION_TYPES.items():
+        legacy_name = LEGACY_OPTION_PREFIX + name
+        try:
+            if legacy_name not in setting or name in api.plugin_config:
+                continue
+            value = setting.raw_value(legacy_name, qtype=qtype)
+            if name == "ffmpeg_path" and not (value and os.path.isfile(value)):
+                continue
+            api.plugin_config[name] = value
+            api.logger.info(f"Migrated setting {legacy_name} = {value!r}")
+        except Exception as e:
+            api.logger.warning(f"Failed to migrate setting {legacy_name}: {e}")
+
+    api.plugin_persist["legacy_settings_migrated"] = True
+
+
+def enable(api: PluginApi) -> None:
+    global _plugin
+
+    for name, default, bounds in PLUGIN_OPTIONS:
+        api.plugin_config.register_option(name, default, bounds=bounds)
+    api.plugin_persist.register_option("legacy_settings_migrated", False)
+    _migrate_legacy_settings(api)
+
+    _plugin = AcousticBrainzNG(api)
+    api.tagger.register_cleanup(_plugin.shutdown)
+
+    api.register_options_page(AcousticBrainzNGOptionsPage)
+    api.register_track_action(AcousticBrainzNGAction)
+    api.register_album_action(AcousticBrainzNGAction)
+    api.register_track_action(AcousticBrainzNGDeleteCacheAction)
+    api.register_album_action(AcousticBrainzNGDeleteCacheAction)
+
+
+def disable() -> None:
+    global _plugin
+
+    if _plugin is not None:
+        _plugin.shutdown()
+        _plugin = None
