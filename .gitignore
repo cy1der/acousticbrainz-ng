@@ -1,2 +1,5 @@
 __pycache__/
 cache/
+# Created by the scripts in scripts/
+bin/
+build/

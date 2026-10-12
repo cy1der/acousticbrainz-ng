@@ -24,16 +24,26 @@ OPTIONAL_MODELS: List[Tuple[str, str]] = [
     ("genre_tzanetakis-musicnn-msd-2", "genre_tzanetakis")
 ]
 
+# Built from the sources in extractors/ by the scripts in scripts/
 REQUIRED_BINARIES: List[str] = [
-    "streaming_rhythmextractor_multifeature",
-    "streaming_musicnn_predict",
-    "streaming_key",
-    "streaming_md5",
+    "abng_key",
+    "abng_musicnn",
+    "abng_rhythm",
 ]
+
+BUILD_INSTRUCTIONS = "Build them with scripts/build-binaries.sh (Linux, macOS) or scripts/build-binaries.ps1 (Windows), see the README"
+
+# Number of MusicNN patches per TensorFlow run. Doesn't change the results,
+# but the default of 64 needs about 4 times as much memory
+MUSICNN_BATCH_SIZE = 4
 
 # Total number of MusicNN class probabilities across all models, i.e. the
 # number of values encoded into the fingerprint image
 FINGERPRINT_VALUES = 95
+FINGERPRINT_COMMENT = f"{PLUGIN_NAME} fingerprint"
+
+TRACK_LOUDNESS_FILE = "loudness.json"
+ALBUM_LOUDNESS_FILE = "album_loudness.json"
 
 MAX_MUSICNN_WORKERS = max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))
 MAX_CONCURRENT_ANALYSES = 8
@@ -56,6 +66,7 @@ PLUGIN_OPTIONS: List[Tuple[str, Union[str, int, bool], Union[Tuple[int, int], No
     ("save_raw", False, None),
     ("calculate_replaygain", True, None),
     ("save_fingerprint", False, None),
+    ("auto_apply_cached", True, None),
 ]
 
 # Option names used by the Picard 2 version of this plugin, stored in the

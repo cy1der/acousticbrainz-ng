@@ -9,13 +9,13 @@ This is not a 1:1 recreation of the AcousticBrainz schema, but will provide most
 
 External dependencies:
 
-- Essentia binaries compiled with TensorFlow and gaia2 support (included, Linux x86-64)
+- Analysis tools built on Essentia and TensorFlow, which need to be built with the included scripts (see the homepage)
 - A few MusicNN models (included)
 - [FFmpeg](https://ffmpeg.org)
 
 **This plugin is CPU heavy!**
 """
-version = "2.0.0"
+version = "3.0.0"
 api = ["3.0"]
 authors = ["cy1der"]
 maintainers = ["cy1der"]
