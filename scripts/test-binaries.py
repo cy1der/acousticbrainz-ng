@@ -19,10 +19,25 @@ import subprocess
 import sys
 import tempfile
 import wave
+import zlib
 
 SAMPLE_RATE = 44100
 DURATION = 20
 BPM = 120
+
+
+def cover_art_tag() -> bytes:
+    # An ID3 tag with a 1x1 PNG as cover art. FFmpeg shows embedded cover art
+    # as a video stream, like in the FLAC and MP3 files people analyze
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+    body = b"\x00image/png\x00\x03\x00" + png
+    frame = b"APIC" + struct.pack(">I", len(body)) + b"\x00\x00" + body
+    size = bytes((len(frame) >> shift) & 0x7F for shift in (21, 14, 7, 0))
+    return b"ID3\x03\x00\x00" + size + frame
 
 
 def write_test_audio(path: str, channels: int = 2) -> None:
@@ -45,6 +60,15 @@ def write_test_audio(path: str, channels: int = 2) -> None:
         output.setsampwidth(2)
         output.setframerate(SAMPLE_RATE)
         output.writeframes(bytes(frames))
+
+    tag = cover_art_tag()
+    tag += b"\x00" * (len(tag) % 2)
+    with open(path, "r+b") as f:
+        f.seek(0, os.SEEK_END)
+        f.write(b"id3 " + struct.pack("<I", len(tag)) + tag)
+        riff_size = f.tell() - 8
+        f.seek(4)
+        f.write(struct.pack("<I", riff_size))
 
 
 def run(arguments: list) -> subprocess.CompletedProcess:
@@ -69,6 +93,11 @@ def test_ffmpeg(ffmpeg: str, ffprobe: str, stereo: str, directory: str) -> None:
     surround = os.path.join(directory, "Sürround 5.1.wav")
     write_test_audio(surround, channels=6)
 
+    output = run([ffprobe, "-v", "error", "-show_entries", "stream=codec_type",
+                  "-of", "default=noprint_wrappers=1:nokey=1", surround]).stdout
+    if output.split() != ["audio", "video"]:
+        raise SystemExit(f"Expected an audio and a cover art stream, ffprobe found {output.split()}")
+
     output = run([ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
                   "-of", "default=noprint_wrappers=1:nokey=1", surround]).stdout
     if output.strip() != "6":
@@ -84,7 +113,8 @@ def test_ffmpeg(ffmpeg: str, ffprobe: str, stereo: str, directory: str) -> None:
 
     album = loudness(run([ffmpeg, "-hide_banner", "-nostdin", "-i", stereo, "-i", surround, "-filter_complex",
                           "[0:a:0]aformat=channel_layouts=stereo[a0];[1:a:0]aformat=channel_layouts=stereo[a1];"
-                          "[a0][a1]concat=n=2:v=0:a=1,loudnorm=print_format=json", "-f", "null", "-"]).stderr)
+                          "[a0][a1]concat=n=2:v=0:a=1,loudnorm=print_format=json", "-vn", "-sn", "-dn",
+                          "-f", "null", "-"]).stderr)
 
     downmix = os.path.join(directory, "downmix.wav")
     run([ffmpeg, "-hide_banner", "-nostdin", "-i", surround, "-ac", "2", "-c:a", "pcm_f32le", "-y", downmix])

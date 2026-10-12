@@ -15,7 +15,7 @@ External dependencies:
 
 **This plugin is CPU heavy!**
 """
-version = "3.2.0"
+version = "3.2.1"
 api = ["3.0"]
 authors = ["cy1der"]
 maintainers = ["cy1der"]

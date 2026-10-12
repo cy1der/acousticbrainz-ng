@@ -18,11 +18,11 @@ The analysis tools are built and tested on every supported platform by GitHub Ac
 
 ## Getting started
 
-1. Install the [latest release](https://github.com/cy1der/acousticbrainz-ng/releases/latest) of the plugin, either from Picard's plugin options page with `https://github.com/cy1der/acousticbrainz-ng` as the URL and `v3.2.0` as the ref/tag, or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng --ref v3.2.0`
+1. Install the [latest release](https://github.com/cy1der/acousticbrainz-ng/releases/latest) of the plugin, either from Picard's plugin options page with `https://github.com/cy1der/acousticbrainz-ng` as the URL and `v3.2.1` as the ref/tag, or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng --ref v3.2.1`
 2. Enable the plugin
 3. Install the analysis tools, see below
 
-Installed from a release tag, Picard only updates the plugin to newer releases. Installed without one, it follows the development branch instead. To switch an existing install to the releases, run `picard-cli plugins switch-ref AcousticBrainz-ng v3.2.0`.
+Installed from a release tag, Picard only updates the plugin to newer releases. Installed without one, it follows the development branch instead. To switch an existing install to the releases, run `picard-cli plugins switch-ref AcousticBrainz-ng v3.2.1`.
 
 Select albums, tracks, clusters or files and use **Plugins → AcousticBrainz-ng → Analyze** from the context menu. Results are cached, analyzing the same files again or matching them to tracks later applies the cached results without analyzing them again. Analyzing a single track reuses the album's ReplayGain if the whole album has been analyzed before.
 

@@ -95,9 +95,11 @@ class Loudness:
         filter_graph += "".join(f"[a{i}]" for i in range(len(album_track_files)))
         filter_graph += f"concat=n={len(album_track_files)}:v=0:a=1,loudnorm=print_format=json"
 
+        # Without -vn, embedded cover art is added to the output as a video
+        # stream, which the FFmpeg included with the tools can't encode
         return self.measure(
             settings,
-            [*input_args, "-filter_complex", filter_graph],
+            [*input_args, "-filter_complex", filter_graph, "-vn", "-sn", "-dn"],
             f"album with {len(album_track_files)} files"
         )
 
