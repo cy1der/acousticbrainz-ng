@@ -290,7 +290,7 @@ build_ffmpeg() {
       --enable-demuxer="$FFMPEG_DEMUXERS" \
       --enable-decoder="$FFMPEG_DECODERS" \
       --enable-parser="$FFMPEG_PARSERS" \
-      "${asm[@]}"
+      ${asm[@]+"${asm[@]}"}
     make -j"$JOBS"
     make install
   )

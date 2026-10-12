@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 
 project(abng_extractors LANGUAGES C CXX)
 
@@ -30,6 +30,15 @@ set(CMAKE_DISABLE_FIND_PACKAGE_VampSdk ON)
 set(CMAKE_DISABLE_FIND_PACKAGE_Gaia2 ON)
 
 add_subdirectory("${ESSENTIA_SOURCE_DIR}" essentia EXCLUDE_FROM_ALL)
+
+# This generated file registers all of Essentia's algorithms in one huge
+# function, which MSVC takes hours to optimize. It only runs once at startup,
+# so it doesn't need to be optimized
+if(MSVC)
+  set_source_files_properties("${ESSENTIA_SOURCE_DIR}/src/algorithms/essentia_algorithms_reg_2.cpp"
+    DIRECTORY "${ESSENTIA_SOURCE_DIR}/src"
+    PROPERTIES COMPILE_OPTIONS "/Od")
+endif()
 
 # Essentia silently disables the algorithms whose dependencies are missing,
 # which would only show up as errors at runtime. The find_library() results
