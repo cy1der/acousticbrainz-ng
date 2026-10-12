@@ -381,10 +381,12 @@ os.symlink("libtensorflow_cc.so.2", os.path.join(destination, "lib", "libtensorf
 EOF
 }
 
-build_dependency eigen
-build_dependency fftw
-build_dependency yaml
-build_dependency libsamplerate
+if [ "$FFMPEG_ONLY" = 0 ]; then
+  build_dependency eigen
+  build_dependency fftw
+  build_dependency yaml
+  build_dependency libsamplerate
+fi
 # Rebuilds FFmpeg when its configuration changes
 build_dependency ffmpeg "$({ declare -f build_ffmpeg; echo "$FFMPEG_DEMUXERS $FFMPEG_DECODERS $FFMPEG_PARSERS $FFMPEG_FILTERS $FFMPEG_MUXERS $FFMPEG_ENCODERS"; } | cksum | cut -d' ' -f1)"
 
