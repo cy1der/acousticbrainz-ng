@@ -12,13 +12,6 @@
 name: Analysis tools
 
 on:
-  push:
-    branches: [apiv3]
-    paths:
-      - extractors/**
-      - scripts/build-binaries.*
-      - scripts/test-binaries.py
-      - .github/workflows/tools.yml
   pull_request:
     paths:
       - extractors/**
