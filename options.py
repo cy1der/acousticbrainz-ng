@@ -1,9 +1,12 @@
 import os
 import subprocess
+import threading
 
 from picard.plugin3.api import OptionsPage
+from picard.util import thread
 from PyQt6 import QtWidgets, QtCore
 
+from .analyzer import get_instance
 from .constants import (
     BUILD_INSTRUCTIONS,
     OPTIONAL_MODELS,
@@ -11,8 +14,18 @@ from .constants import (
     PLUGIN_OPTIONS,
     REQUIRED_BINARIES,
     REQUIRED_MODELS,
+    TOOLS_RELEASE,
 )
-from .settings import default_path, exe, resolve_path
+from .installer import (
+    InstallCancelled,
+    InstallError,
+    ToolsInstaller,
+    archive_name,
+    archive_platform,
+    installed_release,
+    proxy_url,
+)
+from .settings import default_path, exe, platform_name, resolve_path
 
 
 class AcousticBrainzNGOptionsPage(OptionsPage):
@@ -184,8 +197,18 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         paths_layout.addWidget(QtWidgets.QLabel("FFmpeg", self))
         paths_layout.addLayout(ffmpeg_layout)
+        # Prebuilt tools
+        self.tools_status_label = QtWidgets.QLabel(self)
+        self.install_tools_button = QtWidgets.QPushButton("Install tools", self)
+        self.install_tools_button.setToolTip(f"Download the prebuilt analysis tools (tools-{TOOLS_RELEASE} release) to the default binaries path")
+        self.install_tools_button.clicked.connect(self._install_tools)
+        tools_layout = QtWidgets.QHBoxLayout()
+        tools_layout.addWidget(self.tools_status_label, 1)
+        tools_layout.addWidget(self.install_tools_button)
+
         paths_layout.addWidget(QtWidgets.QLabel("Binaries", self))
         paths_layout.addLayout(binaries_layout)
+        paths_layout.addLayout(tools_layout)
         paths_layout.addWidget(QtWidgets.QLabel("Models", self))
         paths_layout.addLayout(models_layout)
         paths_layout.addWidget(QtWidgets.QLabel("Cache", self))
@@ -194,6 +217,119 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         layout.addWidget(paths_group)
 
         layout.addStretch()
+
+    def _update_tools_status(self) -> None:
+        platform = platform_name()
+        directory = default_path(self.api, "binaries_path")
+        release = installed_release(directory)
+
+        if release == TOOLS_RELEASE:
+            status, button = f"Prebuilt tools-{release} installed", "Reinstall tools"
+        elif release is not None:
+            status, button = f"Prebuilt tools-{release} installed, this version of the plugin needs tools-{TOOLS_RELEASE}", "Update tools"
+        elif all(os.path.exists(os.path.join(directory, exe(binary))) for binary in REQUIRED_BINARIES):
+            status, button = "Locally built tools installed", "Install prebuilt tools"
+        else:
+            status, button = "Analysis tools not installed", "Install tools"
+
+        available = archive_platform(platform) is not None
+        if not available:
+            status += f". There are no prebuilt tools for {platform}, see the README to build them"
+
+        self.tools_status_label.setText(status)
+        self.install_tools_button.setText(button)
+        self.install_tools_button.setEnabled(available)
+
+    def _install_tools(self) -> None:
+        plugin = get_instance()
+        if plugin is not None and plugin.in_flight:
+            QtWidgets.QMessageBox.warning(self, "Install tools", "Wait for the running analyses to finish first.")
+            return
+
+        platform = archive_platform(platform_name())
+        if platform is None:
+            return
+
+        try:
+            proxy = proxy_url(self.api.global_config.setting)
+        except InstallError as e:
+            QtWidgets.QMessageBox.warning(self, "Install tools", str(e))
+            return
+
+        name = archive_name(platform)
+        destination = default_path(self.api, "binaries_path")
+        cancelled = threading.Event()
+
+        dialog = QtWidgets.QProgressDialog(f"Downloading {name}...", "Cancel", 0, 0, self)
+        dialog.setWindowTitle("Install tools")
+        dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(cancelled.set)
+        # Stop the download when the options dialog is closed
+        self.destroyed.connect(lambda: cancelled.set())
+        dialog.show()
+        self.install_tools_button.setEnabled(False)
+
+        def progress(stage: str, done: int, total: int) -> None:
+            thread.to_main(self._install_progress, dialog, name, stage, done, total)
+
+        installer = ToolsInstaller(platform, destination, proxy, progress, cancelled)
+
+        def run() -> None:
+            error = None
+            try:
+                installer.install()
+            except InstallCancelled:
+                pass
+            except InstallError as e:
+                error = str(e)
+            except Exception as e:
+                error = f"Unexpected error: {e}"
+            thread.to_main(self._install_finished, dialog, destination, error, cancelled.is_set())
+
+        # A plain thread, the download can take minutes and would block one of
+        # Picard's worker threads
+        threading.Thread(target=run, name="abng-install-tools", daemon=True).start()
+
+    def _install_progress(self, dialog: QtWidgets.QProgressDialog, name: str, stage: str, done: int, total: int) -> None:
+        if self.deleted:
+            return
+        if stage == "download" and total:
+            dialog.setMaximum(100)
+            dialog.setValue(int(done * 100 / total))
+            dialog.setLabelText(f"Downloading {name} ({done >> 20} of {total >> 20} MB)...")
+        elif stage == "extract":
+            dialog.setRange(0, 0)
+            dialog.setLabelText("Extracting the tools...")
+        elif stage == "check":
+            dialog.setLabelText("Checking that the tools work...")
+
+    def _install_finished(self, dialog: QtWidgets.QProgressDialog, destination: str, error, cancelled: bool) -> None:
+        if self.deleted:
+            return
+        dialog.close()
+        self._update_tools_status()
+
+        if cancelled:
+            return
+        if error:
+            self.api.logger.error(f"Installing the analysis tools failed: {error}")
+            QtWidgets.QMessageBox.warning(self, "Install tools", f"Installing the tools failed:\n\n{error}")
+            return
+
+        self.api.logger.info(f"Installed the analysis tools tools-{TOOLS_RELEASE} to {destination}")
+        custom_path = self.binaries_path_input.text().strip()
+        if custom_path and os.path.normpath(custom_path) != os.path.normpath(destination):
+            answer = QtWidgets.QMessageBox.question(
+                self, "Install tools",
+                f"Installed the tools to {destination}.\n\nUse them instead of the binaries in {custom_path}?"
+            )
+            if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+                self.binaries_path_input.clear()
+        else:
+            QtWidgets.QMessageBox.information(self, "Install tools", f"Installed the tools to {destination}.")
 
     def _update_fingerprint_state(self, checked):
         if not checked:
@@ -322,6 +458,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.ffmpeg_path_input.setText(cfg["ffmpeg_path"])
         self.models_path_input.setText(cfg["models_path"])
         self.cache_path_input.setText(cfg["cache_path"])
+
+        self._update_tools_status()
 
     def save(self):
         self._check_binaries()

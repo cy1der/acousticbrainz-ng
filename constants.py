@@ -35,8 +35,26 @@ REQUIRED_BINARIES: List[str] = [
 # plugin needs, see "Analysis tools" in the README
 TOOLS_RELEASE = 1
 
+TOOLS_URL = "https://github.com/cy1der/acousticbrainz-ng/releases/download/tools-{release}/{name}"
+
+# SHA-256 of the archives of TOOLS_RELEASE by platform, from the release's
+# SHA256SUMS. Pinned here so that a download is only trusted if it matches
+# what this version of the plugin expects
+TOOLS_CHECKSUMS: Dict[str, str] = {
+    "linux-x86_64": "1e5c6437b7a6522536b54bc3035e2f1dc49ea8b59a8aa301d5186676bf5d11c6",
+    "linux-arm64": "10a23fb1f0df0f233c37ec92f8c38fc1ee33ac4d0a4ad500cb49b085bd3f0743",
+    "macos-arm64": "c953834a5d22d30c1303c8687c49443e627483a06de4beeb6578236dcff55b0b",
+    "macos-x86_64": "d434ffad7d6f610762853313c6a7c88ffaf45214133070411165f9510c54c31c",
+    "windows-x86_64": "09b16158cf62660035526103e66dc8768497da4515c554da1e239f177a21ad89",
+}
+
+# Platforms without their own build that can run another platform's tools
+TOOLS_PLATFORM_ALIASES: Dict[str, str] = {
+    "windows-arm64": "windows-x86_64",
+}
+
 BUILD_INSTRUCTIONS = (
-    f"Download them from the tools-{TOOLS_RELEASE} release on GitHub, or build them with "
+    "Install them with the \"Install tools\" button in the plugin options, or build them with "
     "scripts/build-binaries.sh (Linux, macOS) or scripts/build-binaries.ps1 (Windows), see the README"
 )
 

@@ -37,7 +37,9 @@ The plugin looks for them in `bin/<platform>/` in its install directory, `picard
 
 ### Prebuilt
 
-Download the archive for your platform from the [`tools-1` release](https://github.com/cy1der/acousticbrainz-ng/releases/tag/tools-1) and extract it into the plugin's `bin/` directory, it contains a `<platform>/` directory:
+Click **Install tools** in the plugin options page (Options → Plugins → AcousticBrainz-ng). It downloads the tools for your platform from the [`tools-1` release](https://github.com/cy1der/acousticbrainz-ng/releases/tag/tools-1), checks them against the checksums pinned in the plugin and installs them. It uses Picard's proxy settings, only HTTP proxies are supported.
+
+To install them manually instead, download the archive for your platform and extract it into the plugin's `bin/` directory, it contains a `<platform>/` directory:
 
 | Platform | Archive |
 |----------|---------|
@@ -80,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build-binaries.ps1
 Publish a new tools release when `extractors/` or the dependencies in the build scripts change:
 
 1. Run the **Analysis tools** workflow from the Actions tab with the next release number, e.g. `2`. It builds and tests the tools on every platform, then publishes the `tools-2` release with checksums and build provenance. Release numbers are plain integers, Picard would mistake tags like `tools-v2.0.0` for plugin versions.
-2. Update the release number in this README and in `TOOLS_RELEASE` in `constants.py`.
+2. Update the release number in this README and in `TOOLS_RELEASE` in `constants.py`, and copy the checksums from the release's `SHA256SUMS` to `TOOLS_CHECKSUMS` in `constants.py`. The install button only accepts archives matching these checksums.
 
 Pushes and pull requests that change the tools run the same builds without publishing anything.
 
