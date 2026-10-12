@@ -6,7 +6,7 @@ This plugin is not affiliated with the [AcousticBrainz](https://acousticbrainz.o
 
 This branch targets Picard 3 (plugin API v3). For Picard 2, use the [`apiv2`](https://github.com/cy1der/acousticbrainz-ng/tree/apiv2) branch.
 
-The build scripts for macOS and Windows haven't been tested yet. Earlier versions of the plugin crashed on Windows with an access violation (exit code 3221225477), if you run into this or have a fix, please let me know.
+The analysis tools are built and tested on every supported platform by GitHub Actions, but the plugin itself hasn't been tested in Picard on macOS and Windows yet. Earlier versions of the plugin crashed on Windows with an access violation (exit code 3221225477), if you run into this or have a fix, please let me know.
 
 ## Features
 
@@ -19,7 +19,7 @@ The build scripts for macOS and Windows haven't been tested yet. Earlier version
 ## Getting started
 
 1. Install the plugin, either from Picard's plugin options page or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng`
-2. Build the analysis tools, see below
+2. Install the analysis tools, see below
 3. Enable the plugin
 4. If FFmpeg is not on your `PATH`, set the FFmpeg executable path in the plugin options page
 
@@ -29,9 +29,29 @@ Analysis results are cached in Picard's cache directory by default, this can be 
 
 Settings from the Picard 2 version of the plugin are migrated automatically, except for the binaries, models and cache paths.
 
-## Building the analysis tools
+## Analysis tools
 
-The plugin uses a few small programs built on [Essentia](https://essentia.upf.edu) (sources in [`extractors/`](./extractors)), which need to be built for your system. The build scripts download all dependencies with verified checksums, so no other packages are needed. Run them in the plugin's install directory (`picard-cli plugins info AcousticBrainz-ng` shows it), they put the tools in `bin/<platform>/` where the plugin finds them automatically. When building somewhere else, set the binaries path in the plugin options page.
+The plugin uses a few small programs built on [Essentia](https://essentia.upf.edu) (sources in [`extractors/`](./extractors)). They are versioned separately from the plugin since they rarely change, this version of the plugin needs the **`tools-1`** release.
+
+The plugin looks for them in `bin/<platform>/` in its install directory, `picard-cli plugins info AcousticBrainz-ng` shows where that is. When they are somewhere else, set the binaries path in the plugin options page.
+
+### Prebuilt
+
+Download the archive for your platform from the [`tools-1` release](https://github.com/cy1der/acousticbrainz-ng/releases/tag/tools-1) and extract it into the plugin's `bin/` directory, it contains a `<platform>/` directory:
+
+| Platform | Archive |
+|----------|---------|
+| Linux x86_64 (glibc 2.28 or newer) | `abng-tools-1-linux-x86_64.tar.xz` |
+| Linux ARM64 (glibc 2.28 or newer) | `abng-tools-1-linux-arm64.tar.xz` |
+| macOS Apple Silicon (12 or newer) | `abng-tools-1-macos-arm64.tar.xz` |
+| macOS Intel (12 or newer) | `abng-tools-1-macos-x86_64.tar.xz` |
+| Windows x86_64, also Windows on ARM | `abng-tools-1-windows-x86_64.zip` |
+
+The archives are built by GitHub Actions, check them with `sha256sum -c SHA256SUMS` or `gh attestation verify <archive> -R cy1der/acousticbrainz-ng`. After extracting, `python3 scripts/test-binaries.py bin/<platform>` in the plugin's install directory checks that they work.
+
+### Building
+
+The build scripts download all dependencies with verified checksums, so no other packages are needed. Run them in the plugin's install directory, they put the tools in `bin/<platform>/`.
 
 A build takes a few minutes and needs about 2 GB of disk space. The `build/` directory can be deleted afterwards, the tools in `bin/` use about 550 MB, most of which is TensorFlow.
 
@@ -43,7 +63,7 @@ Requirements: a C/C++ compiler, `cmake`, `make`, `tar` and `curl` or `wget`. `na
 scripts/build-binaries.sh
 ```
 
-Supported platforms are Linux x86_64 and macOS (Apple Silicon and Intel). There is no official TensorFlow C library for Linux on ARM, if you have one, pass it with `--tensorflow DIR`. See `scripts/build-binaries.sh --help` for all options.
+Supported platforms are Linux (x86_64 and ARM64) and macOS (Apple Silicon and Intel). Linux on ARM also needs `python3`, there is no official TensorFlow C library for it so the script takes the library from TensorFlow's Python package. See `scripts/build-binaries.sh --help` for all options.
 
 The tools only depend on the C and C++ runtime libraries and the bundled TensorFlow library, so they keep working when your system's libraries are updated.
 
@@ -54,6 +74,15 @@ Requirements: [Visual Studio 2022 or the Build Tools for Visual Studio](https://
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-binaries.ps1
 ```
+
+### Releasing
+
+Publish a new tools release when `extractors/` or the dependencies in the build scripts change:
+
+1. Run the **Analysis tools** workflow from the Actions tab with the next release number, e.g. `2`. It builds and tests the tools on every platform, then publishes the `tools-2` release with checksums and build provenance. Release numbers are plain integers, Picard would mistake tags like `tools-v2.0.0` for plugin versions.
+2. Update the release number in this README and in `TOOLS_RELEASE` in `constants.py`.
+
+Pushes and pull requests that change the tools run the same builds without publishing anything.
 
 ## License
 
