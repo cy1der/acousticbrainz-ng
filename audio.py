@@ -5,6 +5,7 @@ import shutil
 import tempfile
 from typing import Optional, Tuple
 
+from .constants import FFMPEG_MISSING
 from .process import AnalysisCancelled, ProcessRunner
 from .settings import Settings, exe
 
@@ -26,7 +27,7 @@ class AudioTools:
         # caches stay valid, but it also works for more than 2 channels
         try:
             if not settings.ffmpeg_path:
-                raise ValueError("FFmpeg path not configured")
+                raise ValueError(FFMPEG_MISSING)
 
             result = self.runner.run([settings.ffmpeg_path, "-hide_banner", "-nostdin", "-v", "error", "-i", file_path, "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"])
 
@@ -50,7 +51,7 @@ class AudioTools:
         try:
             ffmpeg_path = settings.ffmpeg_path
             if not ffmpeg_path:
-                self.log.warning("FFmpeg path not configured, assuming stereo")
+                self.log.warning(f"{FFMPEG_MISSING}, assuming stereo")
                 return 2
 
             ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), exe("ffprobe"))
@@ -99,18 +100,18 @@ class AudioTools:
     def create_stereo_downmix(self, settings: Settings, file_path: str) -> Optional[str]:
         ffmpeg_path = settings.ffmpeg_path
         if not ffmpeg_path:
-            self.log.error("FFmpeg path not configured, cannot downmix")
+            self.log.error(f"{FFMPEG_MISSING}, cannot downmix")
             return None
 
-        file_ext = os.path.splitext(file_path)[1]
         temp_dir = tempfile.mkdtemp(prefix="acousticbrainz_ng_")
-        temp_file = os.path.join(temp_dir, f"stereo_downmix{file_ext}")
+        # WAV, the FFmpeg included with the tools can't encode other formats
+        temp_file = os.path.join(temp_dir, "stereo_downmix.wav")
         success = False
 
         try:
             self.log.debug(f"Downmixing multichannel audio to stereo: {file_path} -> {temp_file}")
 
-            downmix_proc = self.runner.run([ffmpeg_path, "-hide_banner", "-nostdin", "-i", file_path, "-ac", "2", "-y", temp_file])
+            downmix_proc = self.runner.run([ffmpeg_path, "-hide_banner", "-nostdin", "-i", file_path, "-ac", "2", "-c:a", "pcm_f32le", "-y", temp_file])
 
             if downmix_proc.returncode != 0:
                 self.runner.log_failure(f"FFmpeg downmix failed for {file_path}", downmix_proc)

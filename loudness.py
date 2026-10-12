@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from .audio import AudioTools
 from .cache import read_json, write_json
-from .constants import ALBUM_LOUDNESS_FILE, TRACK_LOUDNESS_FILE
+from .constants import ALBUM_LOUDNESS_FILE, FFMPEG_MISSING, TRACK_LOUDNESS_FILE
 from .process import AnalysisCancelled
 from .settings import Settings
 
@@ -43,7 +43,7 @@ class Loudness:
         # loudness, so a single pass covers both ReplayGain and R128
         ffmpeg_path = settings.ffmpeg_path
         if not ffmpeg_path:
-            self.log.error("FFmpeg path not configured")
+            self.log.error(FFMPEG_MISSING)
             return None
 
         proc = self.runner.run([ffmpeg_path, "-hide_banner", "-nostdin", *args, "-f", "null", "-"])

@@ -58,6 +58,8 @@ BUILD_INSTRUCTIONS = (
     "scripts/build-binaries.sh (Linux, macOS) or scripts/build-binaries.ps1 (Windows), see the README"
 )
 
+FFMPEG_MISSING = "FFmpeg not found, install the analysis tools in the plugin options, they include it, or set its path there"
+
 # Number of MusicNN patches per TensorFlow run. Doesn't change the results,
 # but the default of 64 needs about 4 times as much memory
 MUSICNN_BATCH_SIZE = 4
