@@ -18,9 +18,11 @@ The analysis tools are built and tested on every supported platform by GitHub Ac
 
 ## Getting started
 
-1. Install the plugin, either from Picard's plugin options page or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng`
+1. Install the [latest release](https://github.com/cy1der/acousticbrainz-ng/releases/latest) of the plugin, either from Picard's plugin options page with `https://github.com/cy1der/acousticbrainz-ng` as the URL and `v3.2.0` as the ref/tag, or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng --ref v3.2.0`
 2. Enable the plugin
 3. Install the analysis tools, see below
+
+Installed from a release tag, Picard only updates the plugin to newer releases. Installed without one, it follows the development branch instead. To switch an existing install to the releases, run `picard-cli plugins switch-ref AcousticBrainz-ng v3.2.0`.
 
 Select albums, tracks, clusters or files and use **Plugins → AcousticBrainz-ng → Analyze** from the context menu. Results are cached, analyzing the same files again or matching them to tracks later applies the cached results without analyzing them again. Analyzing a single track reuses the album's ReplayGain if the whole album has been analyzed before.
 
@@ -92,6 +94,13 @@ Publish a new tools release when `extractors/` or the dependencies in the build 
 2. Update the release number in this README and in `TOOLS_RELEASE` in `constants.py`, and copy the checksums from the release's `SHA256SUMS` to `TOOLS_CHECKSUMS` in `constants.py`. The install button only accepts archives matching these checksums.
 
 Pull requests that change the tools run the same builds without publishing anything.
+
+## Releasing the plugin
+
+1. Update `version` in `MANIFEST.toml` and the release tag in "Getting started" above. If the tools changed, publish and pin a new tools release first, see above.
+2. Check the release with `scripts/check-release.py v<version>`, then commit, tag the commit with `v<version>`, e.g. `v3.2.0`, and push the tag.
+
+Pushing the tag publishes a GitHub release for it after running the same check. Tags have to look like `v1.2.3`, Picard ignores other tags when updating plugins installed from a tag.
 
 ## License
 
