@@ -7,9 +7,13 @@ Builds abng_key, abng_musicnn and abng_rhythm and installs them together with
 the TensorFlow C library.
 
 All dependencies are downloaded with verified checksums and linked statically,
-except TensorFlow. FFmpeg is a prebuilt audio-only build made for MSVC
-(https://github.com/wo80/ffmpeg-audio-only), building it from source would
-require MSYS2.
+except TensorFlow. FFmpeg is a prebuilt audio-only library build made for MSVC
+(https://github.com/wo80/ffmpeg-audio-only), building it from source requires
+MSYS2.
+
+The plugin also runs the ffmpeg and ffprobe programs. They are only installed
+with the tools when FFmpeg is built from source and passed with -FFmpeg,
+otherwise FFmpeg has to be installed separately.
 
 Requirements: Visual Studio 2022 or the Visual Studio Build Tools with the
 "Desktop development with C++" workload, which includes CMake and Ninja. The
@@ -25,6 +29,12 @@ Download and build directory (default: build\ in the repository)
 Use an existing TensorFlow C library (a directory containing include\ and lib\)
 instead of downloading it
 
+.PARAMETER FFmpeg
+Use this FFmpeg build (a directory containing include\, lib\ and bin\) instead
+of downloading the prebuilt libraries, and install its ffmpeg and ffprobe
+programs with the tools. Build it in an MSYS2 shell with the Visual Studio
+environment with: scripts/build-binaries.sh --ffmpeg-only
+
 .PARAMETER Clean
 Remove the work directory before building
 
@@ -36,6 +46,7 @@ param(
     [string]$Output = "",
     [string]$WorkDir = "",
     [string]$TensorFlow = "",
+    [string]$FFmpeg = "",
     [switch]$Clean
 )
 
@@ -222,7 +233,11 @@ Invoke-DependencyBuild libsamplerate {
     Invoke-CMakeDependency libsamplerate @('-DLIBSAMPLERATE_EXAMPLES=OFF', '-DLIBSAMPLERATE_INSTALL=ON')
 }
 
-$FFmpegDir = Get-Source ffmpeg
+if ($FFmpeg) {
+    $FFmpegDir = (Resolve-Path $FFmpeg).Path
+} else {
+    $FFmpegDir = Get-Source ffmpeg
+}
 
 $TensorFlowProvided = [bool]$TensorFlow
 if (-not $TensorFlow) {
@@ -238,17 +253,23 @@ if (-not (Test-Path (Join-Path $TensorFlow 'lib\tensorflow.lib'))) {
 Write-Step 'Building tools'
 $ExtractorsBuild = Join-Path $BuildDir 'extractors'
 $FFmpegInclude = Join-Path $FFmpegDir 'include'
-$FFmpegLib = Join-Path $FFmpegDir 'lib'
+# FFmpeg's own MSVC build names its static libraries lib*.a, the prebuilt
+# ones are renamed to *.lib. The linker accepts both
+$FFmpegLibraries = @{}
+foreach ($library in 'avcodec', 'avformat', 'avutil', 'swresample') {
+    $static = Join-Path $FFmpegDir "lib\lib$library.a"
+    $FFmpegLibraries[$library] = if (Test-Path $static) { $static } else { Join-Path $FFmpegDir "lib\$library.lib" }
+}
 $EssentiaDir = Get-Source essentia
 & cmake -S (Join-Path $RepoDir 'extractors') -B $ExtractorsBuild -G Ninja `
     '-DCMAKE_BUILD_TYPE=Release' `
     "-DCMAKE_PREFIX_PATH=$Prefix" `
     "-DESSENTIA_SOURCE_DIR=$EssentiaDir" `
     '-DENABLE_STATIC_DEPENDENCIES=ON' `
-    "-DAVCODEC_INCLUDE_DIRS=$FFmpegInclude" "-DAVCODEC_LIBRARIES=$FFmpegLib\avcodec.lib" `
-    "-DAVFORMAT_INCLUDE_DIRS=$FFmpegInclude" "-DAVFORMAT_LIBRARIES=$FFmpegLib\avformat.lib" `
-    "-DAVUTIL_INCLUDE_DIRS=$FFmpegInclude" "-DAVUTIL_LIBRARIES=$FFmpegLib\avutil.lib" `
-    "-DSWRESAMPLE_INCLUDE_DIRS=$FFmpegInclude" "-DSWRESAMPLE_LIBRARIES=$FFmpegLib\swresample.lib" `
+    "-DAVCODEC_INCLUDE_DIRS=$FFmpegInclude" "-DAVCODEC_LIBRARIES=$($FFmpegLibraries.avcodec)" `
+    "-DAVFORMAT_INCLUDE_DIRS=$FFmpegInclude" "-DAVFORMAT_LIBRARIES=$($FFmpegLibraries.avformat)" `
+    "-DAVUTIL_INCLUDE_DIRS=$FFmpegInclude" "-DAVUTIL_LIBRARIES=$($FFmpegLibraries.avutil)" `
+    "-DSWRESAMPLE_INCLUDE_DIRS=$FFmpegInclude" "-DSWRESAMPLE_LIBRARIES=$($FFmpegLibraries.swresample)" `
     "-DFFTW3f_INCLUDE_DIR=$Prefix\include" "-DFFTW3f_LIBRARY=$Prefix\lib\fftw3f.lib" `
     "-Dyaml_INCLUDE_DIR=$Prefix\include" "-Dyaml_LIBRARY=$Prefix\lib\yaml.lib" `
     "-DSampleRate_INCLUDE_DIR=$Prefix\include" "-DSampleRate_LIBRARY=$Prefix\lib\samplerate.lib" `
@@ -262,6 +283,19 @@ New-Item -ItemType Directory -Path $Output -Force | Out-Null
 & cmake --install $ExtractorsBuild --component tools --prefix $Output
 Assert-Success 'Installing the tools'
 Copy-Item (Join-Path $TensorFlow 'lib\tensorflow.dll') $Output -Force
+
+$Programs = @()
+foreach ($program in 'ffmpeg.exe', 'ffprobe.exe') {
+    Remove-Item (Join-Path $Output $program) -ErrorAction SilentlyContinue
+    $path = Join-Path $FFmpegDir "bin\$program"
+    if (Test-Path $path) {
+        Copy-Item $path $Output -Force
+        $Programs += $program
+    }
+}
+if (-not $Programs) {
+    Write-Host 'The ffmpeg and ffprobe programs are not included, install FFmpeg separately or build it with -FFmpeg'
+}
 Remove-Item (Join-Path $Output 'LICENSE.tensorflow') -ErrorAction SilentlyContinue
 
 # The licenses of everything included in the binaries, needed when
@@ -296,7 +330,8 @@ foreach ($license in $FFmpegLicenses) {
 }
 
 $notice = @(
-    'abng_key, abng_musicnn and abng_rhythm are licensed under the AGPL-3.0-or-later.'
+    'abng_key, abng_musicnn and abng_rhythm are licensed under the AGPL-3.0-or-later,'
+    'ffmpeg and ffprobe, when included, under the LGPL-2.1-or-later.'
     'Their source code and the scripts used to build them are available at'
     'https://github.com/cy1der/acousticbrainz-ng (extractors/ and scripts/).'
     ''
@@ -308,11 +343,24 @@ foreach ($name in 'essentia', 'eigen', 'fftw', 'yaml', 'libsamplerate', 'ffmpeg'
     $source = $Sources[$name]
     if ($name -eq 'tensorflow' -and $TensorFlowProvided) {
         $notice += "- tensorflow ($($source.License)): provided by the user from $TensorFlow"
+    } elseif ($name -eq 'ffmpeg' -and $FFmpeg) {
+        # Written by build-binaries.sh --ffmpeg-only
+        $sourceFile = Join-Path $FFmpegDir 'FFMPEG_SOURCE'
+        if (Test-Path $sourceFile) {
+            $notice += "- $((Get-Content $sourceFile -TotalCount 1).Trim())"
+        } else {
+            $notice += "- ffmpeg ($($source.License)): provided by the user from $FFmpeg"
+        }
     } else {
         $notice += "- $name $($source.Version) ($($source.License)): $($source.Url)"
     }
 }
 $notice | Set-Content -Path (Join-Path $LicenseDir 'README.txt') -Encoding ASCII
+
+foreach ($program in $Programs) {
+    & (Join-Path $Output $program) -version | Out-Null
+    Assert-Success "Running $program"
+}
 
 # Without arguments the tools print their usage, anything else means they
 # can't be loaded, e.g. because of a missing DLL

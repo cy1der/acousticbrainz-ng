@@ -57,10 +57,13 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
     def _path_line_edit(self, name: str, description: str) -> QtWidgets.QLineEdit:
         line_edit = QtWidgets.QLineEdit(self)
+        line_edit.setToolTip("Leave empty to use the default")
+        self._set_default_placeholder(line_edit, name, description)
+        return line_edit
+
+    def _set_default_placeholder(self, line_edit: QtWidgets.QLineEdit, name: str, description: str) -> None:
         default = default_path(self.api, name)
         line_edit.setPlaceholderText(f"{description} (default: {default})" if default else description)
-        line_edit.setToolTip("Leave empty to use the default")
-        return line_edit
 
     def setup_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -239,6 +242,9 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.tools_status_label.setText(status)
         self.install_tools_button.setText(button)
         self.install_tools_button.setEnabled(available)
+
+        # The default FFmpeg is the one included with the tools, if installed
+        self._set_default_placeholder(self.ffmpeg_path_input, "ffmpeg_path", "Path to FFmpeg")
 
     def _install_tools(self) -> None:
         plugin = get_instance()

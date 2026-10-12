@@ -19,9 +19,8 @@ The analysis tools are built and tested on every supported platform by GitHub Ac
 ## Getting started
 
 1. Install the plugin, either from Picard's plugin options page or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng`
-2. Install the analysis tools, see below
-3. Enable the plugin
-4. If FFmpeg is not on your `PATH`, set the FFmpeg executable path in the plugin options page
+2. Enable the plugin
+3. Install the analysis tools, see below
 
 Select albums, tracks, clusters or files and use **Plugins → AcousticBrainz-ng → Analyze** from the context menu. Results are cached, analyzing the same files again or matching them to tracks later applies the cached results without analyzing them again. Analyzing a single track reuses the album's ReplayGain if the whole album has been analyzed before.
 
@@ -31,7 +30,7 @@ Settings from the Picard 2 version of the plugin are migrated automatically, exc
 
 ## Analysis tools
 
-The plugin uses a few small programs built on [Essentia](https://essentia.upf.edu) (sources in [`extractors/`](./extractors)). They are versioned separately from the plugin since they rarely change, this version of the plugin needs the **`tools-1`** release.
+The plugin uses a few small programs built on [Essentia](https://essentia.upf.edu) (sources in [`extractors/`](./extractors)), and FFmpeg for ReplayGain. The tools include audio-only `ffmpeg` and `ffprobe` programs, the plugin uses them unless the FFmpeg path is set in the plugin options page, and falls back to an FFmpeg on the `PATH`. They are versioned separately from the plugin since they rarely change, this version of the plugin needs the **`tools-1`** release.
 
 The plugin looks for them in `bin/<platform>/` in its install directory, `picard-cli plugins info AcousticBrainz-ng` shows where that is. When they are somewhere else, set the binaries path in the plugin options page.
 
@@ -77,6 +76,14 @@ Requirements: [Visual Studio 2022 or the Build Tools for Visual Studio](https://
 powershell -ExecutionPolicy Bypass -File scripts\build-binaries.ps1
 ```
 
+This uses prebuilt FFmpeg libraries and doesn't include the `ffmpeg` and `ffprobe` programs, install FFmpeg separately then. To include them, build FFmpeg first in an [MSYS2](https://www.msys2.org) shell started from the Visual Studio developer command prompt, with `make`, `diffutils` and `nasm` installed and the `MSYS2_PATH_TYPE=inherit` environment variable set:
+
+```sh
+scripts/build-binaries.sh --ffmpeg-only
+```
+
+Then pass it to the build script with `-FFmpeg build\prefix-windows-x86_64`.
+
 ### Releasing
 
 Publish a new tools release when `extractors/` or the dependencies in the build scripts change:
@@ -92,4 +99,4 @@ Pushes and pull requests that change the tools run the same builds without publi
 - The tools in `extractors/` are based on Essentia's examples and, like Essentia, licensed under the AGPL-3.0-or-later, see [`extractors/LICENSE`](./extractors/LICENSE). The plugin only runs them as separate programs.
 - The models in `models/` were created by the Music Technology Group of Universitat Pompeu Fabra and are licensed under the CC BY-NC-SA 4.0, see [`models/LICENSE.md`](./models/LICENSE.md). **They may not be used for commercial purposes.**
 
-The built tools also include FFmpeg (LGPL-2.1-or-later), FFTW (GPL-2.0-or-later), Eigen (MPL-2.0), libyaml (MIT), libsamplerate (BSD-2-Clause) and TensorFlow (Apache-2.0). The build scripts put the license texts of all of them in `bin/<platform>/licenses/`, keep that directory when distributing the built tools.
+The built tools also include FFmpeg (LGPL-2.1-or-later, also the `ffmpeg` and `ffprobe` programs), FFTW (GPL-2.0-or-later), Eigen (MPL-2.0), libyaml (MIT), libsamplerate (BSD-2-Clause) and TensorFlow (Apache-2.0). The build scripts put the license texts of all of them in `bin/<platform>/licenses/`, keep that directory when distributing the built tools.

@@ -73,6 +73,10 @@ foreach(tool ${ABNG_TOOLS})
   add_executable(${tool} ${tool}.cpp)
   target_compile_features(${tool} PRIVATE cxx_std_17)
   target_link_libraries(${tool} PRIVATE essentia ${STATIC_FFMPEG_LIBRARIES})
+  if(MSVC)
+    # Embedded by the linker, see the file
+    target_sources(${tool} PRIVATE utf8.manifest)
+  endif()
 endforeach()
 
 install(TARGETS ${ABNG_TOOLS} RUNTIME DESTINATION . COMPONENT tools)

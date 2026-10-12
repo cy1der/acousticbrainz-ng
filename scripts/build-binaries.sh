@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# Builds the Essentia based tools used by the plugin on Linux and macOS.
+# Builds the Essentia based tools used by the plugin on Linux and macOS,
+# together with audio-only ffmpeg and ffprobe programs, which the plugin uses
+# for ReplayGain, hashing and downmixing.
 #
 # All dependencies except TensorFlow are built from source as static
 # libraries, so no distribution packages are needed and the binaries keep
@@ -9,6 +11,10 @@
 #
 # Requirements: a C/C++ compiler, cmake, make, tar, curl or wget.
 # Optional: nasm (faster FFmpeg decoders on x86_64).
+#
+# On Windows, build-binaries.ps1 builds the tools. In an MSYS2 shell with the
+# Visual Studio environment, this script can build FFmpeg for it with
+# --ffmpeg-only.
 
 set -euo pipefail
 
@@ -37,6 +43,11 @@ TENSORFLOW=(
 FFMPEG_DEMUXERS="aac,ac3,aiff,ape,asf,au,caf,dsf,dts,eac3,flac,iff,matroska,mlp,mov,mp3,mpc,mpc8,ogg,tak,truehd,tta,w64,wav,wv"
 FFMPEG_DECODERS="aac,aac_latm,ac3,alac,ape,dca,dsd_lsbf,dsd_lsbf_planar,dsd_msbf,dsd_msbf_planar,eac3,flac,mlp,mp1,mp1float,mp2,mp2float,mp3,mp3float,mpc7,mpc8,opus,pcm_*,speex,tak,truehd,tta,vorbis,wavpack,wmalossless,wmapro,wmav1,wmav2"
 FFMPEG_PARSERS="aac,aac_latm,ac3,dca,flac,mlp,mpegaudio,opus,tak,vorbis"
+# What the plugin's ffmpeg commands use: loudness measurement of single files
+# and albums, hashing the audio packets and downmixing to WAV
+FFMPEG_FILTERS="aformat,anull,aresample,concat,loudnorm"
+FFMPEG_MUXERS="md5,null,wav"
+FFMPEG_ENCODERS="pcm_f32le,pcm_s16le"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -54,6 +65,8 @@ Options:
                      include/ and lib/) instead of downloading it. Required on
                      platforms without official builds, e.g. Linux on ARM
   --jobs N           Number of parallel build jobs (default: number of CPUs)
+  --ffmpeg-only      Only build FFmpeg into the work directory, used to build
+                     it for build-binaries.ps1 on Windows
   --clean            Remove the work directory before building
   -h, --help         Show this help
 EOF
@@ -71,7 +84,8 @@ log() {
 case "$(uname -s)" in
   Linux) OS=linux ;;
   Darwin) OS=macos ;;
-  *) die "Unsupported operating system $(uname -s), use build-binaries.ps1 on Windows" ;;
+  MINGW*|MSYS*) OS=windows ;;
+  *) die "Unsupported operating system $(uname -s)" ;;
 esac
 
 case "$(uname -m)" in
@@ -92,6 +106,7 @@ OUTPUT_DIR="$REPO_DIR/bin/$PLATFORM"
 WORK_DIR="$REPO_DIR/build"
 TENSORFLOW_DIR=""
 CLEAN=0
+FFMPEG_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -99,18 +114,27 @@ while [ $# -gt 0 ]; do
     --work-dir) WORK_DIR="$2"; shift 2 ;;
     --tensorflow) TENSORFLOW_DIR="$2"; shift 2 ;;
     --jobs) JOBS="$2"; shift 2 ;;
+    --ffmpeg-only) FFMPEG_ONLY=1; shift ;;
     --clean) CLEAN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "Unknown option $1" ;;
   esac
 done
 
-for tool in cmake make tar; do
-  command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
-done
+if [ "$OS" = windows ]; then
+  [ "$FFMPEG_ONLY" = 1 ] || die "Use build-binaries.ps1 on Windows, this script only builds FFmpeg there (--ffmpeg-only)"
+  command -v cl >/dev/null 2>&1 || die "The Visual Studio compiler (cl) isn't on the PATH, set up the Visual Studio environment first"
+  for tool in make tar; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
+  done
+else
+  for tool in cmake make tar; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
+  done
+  command -v "${CC:-cc}" >/dev/null 2>&1 || die "A C compiler is required (set CC to use a different one)"
+  command -v "${CXX:-c++}" >/dev/null 2>&1 || die "A C++ compiler is required (set CXX to use a different one)"
+fi
 command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "curl or wget is required"
-command -v "${CC:-cc}" >/dev/null 2>&1 || die "A C compiler is required (set CC to use a different one)"
-command -v "${CXX:-c++}" >/dev/null 2>&1 || die "A C++ compiler is required (set CXX to use a different one)"
 
 if [ "$CLEAN" = 1 ]; then
   rm -rf "$WORK_DIR"
@@ -193,10 +217,11 @@ version_of() {
   done
 }
 
-# Runs a dependency build function unless it already completed for this version
+# Runs a dependency build function unless it already completed for this
+# version, and the configuration identified by the optional second argument
 build_dependency() {
   local stamp
-  stamp="$PREFIX/stamps/$1-$(version_of "$1")"
+  stamp="$PREFIX/stamps/$1-$(version_of "$1")${2:+-$2}"
   if [ -f "$stamp" ]; then
     log "$1 already built"
     return
@@ -270,11 +295,19 @@ build_libsamplerate() {
 }
 
 build_ffmpeg() {
-  local src asm=()
+  local src options=()
   src="$(unpack ffmpeg)"
+  if [ "$OS" = windows ]; then
+    # MSYS2 has its own link.exe, make sure the Visual Studio linker is used.
+    # -MD: the same C runtime as Essentia
+    PATH="$(dirname "$(command -v cl)"):$PATH"
+    options=(--toolchain=msvc --target-os=win64 --arch=x86_64 --enable-w32threads --extra-cflags=-MD)
+  else
+    options=(--cc="${CC:-cc}" --cxx="${CXX:-c++}" --enable-pthreads --enable-pic)
+  fi
   if [ "$ARCH" = x86_64 ] && ! command -v nasm >/dev/null 2>&1; then
     echo "nasm not found, building FFmpeg without x86 assembly optimizations"
-    asm=(--disable-x86asm)
+    options+=(--disable-x86asm)
   fi
   local build="$BUILD_DIR/ffmpeg"
   rm -rf "$build"
@@ -282,18 +315,30 @@ build_ffmpeg() {
   (
     cd "$build"
     "$src/configure" --prefix="$PREFIX" --libdir="$PREFIX/lib" \
-      --cc="${CC:-cc}" --cxx="${CXX:-c++}" \
-      --enable-static --disable-shared --enable-pic \
-      --disable-autodetect --disable-programs --disable-doc --disable-network \
-      --disable-everything --disable-avdevice --disable-avfilter --disable-swscale \
-      --enable-protocol=file \
+      --enable-static --disable-shared \
+      --disable-autodetect --disable-doc --disable-network \
+      --disable-programs --enable-ffmpeg --enable-ffprobe \
+      --disable-everything --disable-avdevice --disable-swscale \
+      --enable-protocol=file,pipe \
       --enable-demuxer="$FFMPEG_DEMUXERS" \
       --enable-decoder="$FFMPEG_DECODERS" \
       --enable-parser="$FFMPEG_PARSERS" \
-      ${asm[@]+"${asm[@]}"}
+      --enable-filter="$FFMPEG_FILTERS" \
+      --enable-muxer="$FFMPEG_MUXERS" \
+      --enable-encoder="$FFMPEG_ENCODERS" \
+      "${options[@]}"
     make -j"$JOBS"
     make install
   )
+
+  # For the license notice of build-binaries.ps1
+  local entry name version url rest
+  for entry in "${SOURCES[@]}"; do
+    IFS='|' read -r name version url rest <<<"$entry"
+    if [ "$name" = ffmpeg ]; then
+      echo "ffmpeg $version (LGPL-2.1-or-later): $url" > "$PREFIX/FFMPEG_SOURCE"
+    fi
+  done
 }
 
 # Lays out the C API part of the TensorFlow Python package like the C library:
@@ -340,7 +385,13 @@ build_dependency eigen
 build_dependency fftw
 build_dependency yaml
 build_dependency libsamplerate
-build_dependency ffmpeg
+# Rebuilds FFmpeg when its configuration changes
+build_dependency ffmpeg "$({ declare -f build_ffmpeg; echo "$FFMPEG_DEMUXERS $FFMPEG_DECODERS $FFMPEG_PARSERS $FFMPEG_FILTERS $FFMPEG_MUXERS $FFMPEG_ENCODERS"; } | cksum | cut -d' ' -f1)"
+
+if [ "$FFMPEG_ONLY" = 1 ]; then
+  log "Done, FFmpeg is in $PREFIX"
+  exit 0
+fi
 
 if [ -z "$TENSORFLOW_DIR" ]; then
   tensorflow_entry=""
@@ -398,6 +449,10 @@ cmake --build "$EXTRACTORS_BUILD"
 log "Installing to $OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 cmake --install "$EXTRACTORS_BUILD" --component tools --prefix "$OUTPUT_DIR" --strip
+for program in ffmpeg ffprobe; do
+  rm -f "$OUTPUT_DIR/$program"
+  cp "$PREFIX/bin/$program" "$OUTPUT_DIR/"
+done
 
 # Copy the TensorFlow libraries, keeping the versioned names the binaries link
 # to. The libraries are read-only, remove the ones of a previous build first
@@ -451,7 +506,8 @@ copy_licenses ffmpeg "$(unpack ffmpeg)/COPYING.LGPLv2.1" "$(unpack ffmpeg)/LICEN
 copy_licenses tensorflow "$TENSORFLOW_DIR/LICENSE" "$TENSORFLOW_DIR/THIRD_PARTY_TF_C_LICENSES" "$TENSORFLOW_DIR/THIRD_PARTY_NOTICES.txt"
 
 {
-  echo "abng_key, abng_musicnn and abng_rhythm are licensed under the AGPL-3.0-or-later."
+  echo "abng_key, abng_musicnn and abng_rhythm are licensed under the AGPL-3.0-or-later,"
+  echo "ffmpeg and ffprobe under the LGPL-2.1-or-later."
   echo "Their source code and the scripts used to build them are available at"
   echo "https://github.com/cy1der/acousticbrainz-ng (extractors/ and scripts/)."
   echo
@@ -471,6 +527,8 @@ copy_licenses tensorflow "$TENSORFLOW_DIR/LICENSE" "$TENSORFLOW_DIR/THIRD_PARTY_
 
 # Without arguments the tools print their usage, anything else means they
 # can't be loaded, e.g. because of a missing library
+"$OUTPUT_DIR/ffmpeg" -version >/dev/null || die "$OUTPUT_DIR/ffmpeg doesn't run"
+"$OUTPUT_DIR/ffprobe" -version >/dev/null || die "$OUTPUT_DIR/ffprobe doesn't run"
 for tool in abng_key abng_musicnn abng_rhythm; do
   output="$("$OUTPUT_DIR/$tool" 2>&1 || true)"
   case "$output" in

@@ -120,13 +120,35 @@ jobs:
         if: runner.os != 'Windows'
         run: scripts/build-binaries.sh
 
+      # Building FFmpeg, which includes the ffmpeg and ffprobe programs, with
+      # Visual Studio needs MSYS2
+      - name: Set up Visual Studio
+        if: runner.os == 'Windows'
+        uses: TheMrMilchmann/setup-msvc-dev@368ef7d1ee4d1171b31d4a7f67f4d954f903f5a9 # v4.1.0
+        with:
+          arch: x64
+
+      - name: Set up MSYS2
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          install: make diffutils
+          pacboy: nasm:p
+          path-type: inherit
+
+      - name: Build FFmpeg
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: scripts/build-binaries.sh --ffmpeg-only
+
       - name: Build
         id: build-windows
         if: runner.os == 'Windows'
         # Leaves time for the next step when the build hangs
         timeout-minutes: 90
         shell: pwsh
-        run: scripts/build-binaries.ps1
+        run: scripts/build-binaries.ps1 -FFmpeg build/prefix-windows-x86_64
 
       # Ninja only logs finished steps, list the slowest ones and the compiles
       # that never finished to find out where a failed build got stuck
@@ -153,11 +175,11 @@ jobs:
 
       - name: Test
         if: runner.os != 'Windows'
-        run: python3 scripts/test-binaries.py "bin/${{ matrix.platform }}"
+        run: python3 scripts/test-binaries.py --require-ffmpeg "bin/${{ matrix.platform }}"
 
       - name: Test
         if: runner.os == 'Windows'
-        run: python scripts/test-binaries.py "bin/${{ matrix.platform }}"
+        run: python scripts/test-binaries.py --require-ffmpeg "bin/${{ matrix.platform }}"
 
       - name: Package
         if: runner.os != 'Windows'

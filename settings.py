@@ -62,6 +62,10 @@ def default_path(api: PluginApi, name: str) -> str:
     if name == "cache_path":
         return os.path.join(_picard_cache_folder(), "acousticbrainz-ng")
     if name == "ffmpeg_path":
+        # The analysis tools include ffmpeg, a system wide one is the fallback
+        bundled = os.path.join(resolve_path(api, "binaries_path"), exe("ffmpeg"))
+        if os.path.isfile(bundled):
+            return bundled
         return shutil.which("ffmpeg") or ""
     raise KeyError(name)
 
