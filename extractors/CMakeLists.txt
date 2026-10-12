@@ -31,11 +31,10 @@ set(CMAKE_DISABLE_FIND_PACKAGE_Gaia2 ON)
 
 add_subdirectory("${ESSENTIA_SOURCE_DIR}" essentia EXCLUDE_FROM_ALL)
 
-# This generated file registers all of Essentia's algorithms in one huge
-# function, which MSVC takes hours to optimize. It only runs once at startup,
-# so it doesn't need to be optimized
+# MSVC takes over 20 minutes to optimize the Eigen tensor code in this file,
+# longer than the rest of Essentia together. The tools don't use it
 if(MSVC)
-  set_source_files_properties("${ESSENTIA_SOURCE_DIR}/src/algorithms/essentia_algorithms_reg_2.cpp"
+  set_source_files_properties("${ESSENTIA_SOURCE_DIR}/src/algorithms/standard/tensornormalize.cpp"
     DIRECTORY "${ESSENTIA_SOURCE_DIR}/src"
     PROPERTIES COMPILE_OPTIONS "/Od")
 endif()

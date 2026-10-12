@@ -121,9 +121,35 @@ jobs:
         run: scripts/build-binaries.sh
 
       - name: Build
+        id: build-windows
         if: runner.os == 'Windows'
+        # Leaves time for the next step when the build hangs
+        timeout-minutes: 90
         shell: pwsh
         run: scripts/build-binaries.ps1
+
+      # Ninja only logs finished steps, list the slowest ones and the compiles
+      # that never finished to find out where a failed build got stuck
+      - name: Build timings
+        if: always() && runner.os == 'Windows' && steps.build-windows.outcome != 'success' && steps.build-windows.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          $directory = 'build\build-windows-x86_64\extractors'
+          $log = Join-Path $directory '.ninja_log'
+          if (-not (Test-Path $log)) {
+            Write-Output 'No Ninja log, the build failed before compiling the tools'
+            exit 0
+          }
+          $finished = Get-Content $log | Where-Object { $_ -notlike '#*' } | ForEach-Object {
+            $fields = $_ -split "`t"
+            [pscustomobject]@{ Seconds = ([int64]$fields[1] - [int64]$fields[0]) / 1000; Output = $fields[3] }
+          }
+          Write-Output 'Slowest finished steps:'
+          $finished | Sort-Object Seconds -Descending | Select-Object -First 15 | Format-Table -AutoSize | Out-String -Width 300
+          Write-Output 'Unfinished compiles:'
+          Select-String -Path (Join-Path $directory 'build.ninja') -Pattern '^build ([^:$]+\.obj):' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value } |
+            Where-Object { $_ -notin $finished.Output }
 
       - name: Test
         if: runner.os != 'Windows'

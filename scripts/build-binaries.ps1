@@ -329,3 +329,7 @@ foreach ($tool in 'abng_key', 'abng_musicnn', 'abng_rhythm') {
 }
 
 Write-Step "Done, the binaries are in $Output"
+
+# The checks above leave a non-zero $LASTEXITCODE, which callers like GitHub
+# Actions would report as a failure
+exit 0
