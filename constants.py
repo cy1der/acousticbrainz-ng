@@ -31,7 +31,14 @@ REQUIRED_BINARIES: List[str] = [
     "abng_rhythm",
 ]
 
-BUILD_INSTRUCTIONS = "Build them with scripts/build-binaries.sh (Linux, macOS) or scripts/build-binaries.ps1 (Windows), see the README"
+# The release of the tools (GitHub release tools-<number>) this version of the
+# plugin needs, see "Analysis tools" in the README
+TOOLS_RELEASE = 1
+
+BUILD_INSTRUCTIONS = (
+    f"Download them from the tools-{TOOLS_RELEASE} release on GitHub, or build them with "
+    "scripts/build-binaries.sh (Linux, macOS) or scripts/build-binaries.ps1 (Windows), see the README"
+)
 
 # Number of MusicNN patches per TensorFlow run. Doesn't change the results,
 # but the default of 64 needs about 4 times as much memory

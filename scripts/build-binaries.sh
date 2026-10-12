@@ -24,11 +24,13 @@ SOURCES=(
   "ffmpeg|9.0.2|https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz|84960df915059e8754fef2cd7c9afeb614062b1b5458ec471eecee619ee04e98"
 )
 
-# platform|version|url|sha256
+# platform|version|url|sha256. There is no official TensorFlow C library for
+# Linux on ARM, the library in the Python package provides the same C API
 TENSORFLOW=(
   "linux-x86_64|2.18.1|https://storage.googleapis.com/tensorflow/versions/2.18.1/libtensorflow-cpu-linux-x86_64.tar.gz|b692795f3ad198c531b02aeb2bc8146568d24aaf6a5dbf5faa43907c4028fd73"
   "macos-arm64|2.18.1|https://storage.googleapis.com/tensorflow/versions/2.18.1/libtensorflow-cpu-darwin-arm64.tar.gz|61258fbcc8ff57d2868fa56f20edc06443a29eb2169b9f04515a405d5f1432ec"
   "macos-x86_64|2.16.2|https://storage.googleapis.com/tensorflow/versions/2.16.2/libtensorflow-cpu-darwin-x86_64.tar.gz|26b17967afbe99ef89c16f59b366d62b14c55c5c583af6e70aed8c3b3147ee9f"
+  "linux-arm64|2.18.1|https://files.pythonhosted.org/packages/6c/c2/35a3542a91f4ffd4cf01e72d7f0fb59596cd5f467ff64878b0caef8e0f31/tensorflow-2.18.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl|1ba52b9c06ab8102b31e50acfaf56899b923171e603c8942f2bfeb181d6bb59e"
 )
 
 # Audio formats supported by Picard
@@ -246,7 +248,9 @@ build_fftw() {
   mkdir -p "$build"
   (
     cd "$build"
-    "$src/configure" --prefix="$PREFIX" --libdir="$PREFIX/lib" \
+    # FFTW's assertions include the source file names, a relative path to the
+    # sources keeps the build directory (e.g. the user's home) out of the binaries
+    "../../src/$(basename "$src")/configure" --prefix="$PREFIX" --libdir="$PREFIX/lib" \
       --enable-float --enable-static --disable-shared --disable-fortran \
       --disable-doc --with-pic "${simd[@]}"
     make -j"$JOBS"
@@ -292,6 +296,46 @@ build_ffmpeg() {
   )
 }
 
+# Lays out the C API part of the TensorFlow Python package like the C library:
+# libtensorflow_cc exports the C API and finds the libraries it depends on
+# next to itself
+extract_tensorflow_wheel() {
+  command -v python3 >/dev/null 2>&1 || die "python3 is required to extract TensorFlow on $PLATFORM"
+  python3 -I - "$1" "$2" <<'EOF'
+import os
+import shutil
+import sys
+import zipfile
+
+wheel, destination = sys.argv[1], sys.argv[2]
+targets = {
+    "tensorflow/libtensorflow_cc.so.2": "lib",
+    "tensorflow/libtensorflow_framework.so.2": "lib",
+    "tensorflow/include/LICENSE": ".",
+    "tensorflow/THIRD_PARTY_NOTICES.txt": ".",
+}
+
+with zipfile.ZipFile(wheel) as archive:
+    for info in archive.infolist():
+        name = info.filename
+        if info.is_dir() or ".." in name.split("/"):
+            continue
+        if name.startswith(("tensorflow/include/tensorflow/", "tensorflow/include/tsl/", "tensorflow/include/xla/")):
+            target = os.path.join(destination, "include", name[len("tensorflow/include/"):])
+        elif name.startswith("tensorflow.libs/"):
+            target = os.path.join(destination, "lib", os.path.basename(name))
+        elif name in targets:
+            target = os.path.join(destination, targets[name], os.path.basename(name))
+        else:
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with archive.open(info) as source, open(target, "wb") as output:
+            shutil.copyfileobj(source, output)
+
+os.symlink("libtensorflow_cc.so.2", os.path.join(destination, "lib", "libtensorflow.so"))
+EOF
+}
+
 build_dependency eigen
 build_dependency fftw
 build_dependency yaml
@@ -305,14 +349,23 @@ if [ -z "$TENSORFLOW_DIR" ]; then
       tensorflow_entry="$entry"
     fi
   done
-  [ -n "$tensorflow_entry" ] || die "There is no official TensorFlow C library for $PLATFORM, pass one with --tensorflow"
+  [ -n "$tensorflow_entry" ] || die "There is no TensorFlow C library for $PLATFORM, pass one with --tensorflow"
 
   IFS='|' read -r _ tensorflow_version tensorflow_url tensorflow_checksum <<<"$tensorflow_entry"
   TENSORFLOW_DIR="$WORK_DIR/tensorflow-$PLATFORM-$tensorflow_version"
   if [ ! -d "$TENSORFLOW_DIR" ]; then
-    fetch "libtensorflow-cpu-$PLATFORM-$tensorflow_version.tar.gz" "$tensorflow_url" "$tensorflow_checksum"
+    rm -rf "$TENSORFLOW_DIR.tmp"
     mkdir -p "$TENSORFLOW_DIR.tmp"
-    tar -xzf "$DOWNLOAD_DIR/libtensorflow-cpu-$PLATFORM-$tensorflow_version.tar.gz" -C "$TENSORFLOW_DIR.tmp"
+    case "$tensorflow_url" in
+      *.whl)
+        fetch "tensorflow-$PLATFORM-$tensorflow_version.whl" "$tensorflow_url" "$tensorflow_checksum"
+        extract_tensorflow_wheel "$DOWNLOAD_DIR/tensorflow-$PLATFORM-$tensorflow_version.whl" "$TENSORFLOW_DIR.tmp"
+        ;;
+      *)
+        fetch "libtensorflow-cpu-$PLATFORM-$tensorflow_version.tar.gz" "$tensorflow_url" "$tensorflow_checksum"
+        tar -xzf "$DOWNLOAD_DIR/libtensorflow-cpu-$PLATFORM-$tensorflow_version.tar.gz" -C "$TENSORFLOW_DIR.tmp"
+        ;;
+    esac
     mv "$TENSORFLOW_DIR.tmp" "$TENSORFLOW_DIR"
   fi
 fi
@@ -348,11 +401,13 @@ cmake --install "$EXTRACTORS_BUILD" --component tools --prefix "$OUTPUT_DIR" --s
 
 # Copy the TensorFlow libraries, keeping the versioned names the binaries link
 # to. The libraries are read-only, remove the ones of a previous build first
-rm -f "$OUTPUT_DIR"/libtensorflow*
+for library in "$TENSORFLOW_DIR"/lib/*; do
+  rm -f "$OUTPUT_DIR/$(basename "$library")"
+done
 if [ "$OS" = macos ]; then
-  cp -P "$TENSORFLOW_DIR"/lib/libtensorflow*.dylib "$OUTPUT_DIR/"
+  cp -P "$TENSORFLOW_DIR"/lib/*.dylib "$OUTPUT_DIR/"
 else
-  cp -P "$TENSORFLOW_DIR"/lib/libtensorflow*.so* "$OUTPUT_DIR/"
+  cp -P "$TENSORFLOW_DIR"/lib/*.so* "$OUTPUT_DIR/"
 fi
 rm -f "$OUTPUT_DIR/LICENSE.tensorflow"
 
@@ -393,7 +448,7 @@ copy_licenses fftw "$(unpack fftw)/COPYING"
 copy_licenses yaml "$(unpack yaml)/License"
 copy_licenses libsamplerate "$(unpack libsamplerate)/COPYING"
 copy_licenses ffmpeg "$(unpack ffmpeg)/COPYING.LGPLv2.1" "$(unpack ffmpeg)/LICENSE.md"
-copy_licenses tensorflow "$TENSORFLOW_DIR/LICENSE" "$TENSORFLOW_DIR/THIRD_PARTY_TF_C_LICENSES"
+copy_licenses tensorflow "$TENSORFLOW_DIR/LICENSE" "$TENSORFLOW_DIR/THIRD_PARTY_TF_C_LICENSES" "$TENSORFLOW_DIR/THIRD_PARTY_NOTICES.txt"
 
 {
   echo "abng_key, abng_musicnn and abng_rhythm are licensed under the AGPL-3.0-or-later."

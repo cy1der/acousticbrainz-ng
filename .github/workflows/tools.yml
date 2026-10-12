@@ -1,0 +1,204 @@
+# Builds the analysis tools (extractors/) for every supported platform.
+#
+# Pushes and pull requests that change the tools only build and test them.
+# Running the workflow manually with a release number also publishes them as
+# the GitHub release tools-<number>, see "Releasing the analysis tools" in the
+# README.
+#
+# The tools are versioned separately from the plugin since they rarely change.
+# Release numbers are plain integers: Picard treats tags that look like version
+# numbers, e.g. tools-v1.0.0, as plugin versions when updating plugins.
+
+name: Analysis tools
+
+on:
+  push:
+    branches: [apiv3]
+    paths:
+      - extractors/**
+      - scripts/build-binaries.*
+      - scripts/test-binaries.py
+      - .github/workflows/tools.yml
+  pull_request:
+    paths:
+      - extractors/**
+      - scripts/build-binaries.*
+      - scripts/test-binaries.py
+      - .github/workflows/tools.yml
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release number to publish as tools-<number>, leave empty to only build
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tools-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-24.04
+    outputs:
+      label: ${{ steps.label.outputs.label }}
+    steps:
+      - name: Check the release number
+        id: label
+        env:
+          RELEASE: ${{ inputs.release }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$RELEASE" ]; then
+            echo "label=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The release number must be a positive integer, got '$RELEASE'"
+            exit 1
+          fi
+          # Fail before spending an hour on builds
+          if gh api "repos/$GH_REPO/git/ref/tags/tools-$RELEASE" >/dev/null 2>&1; then
+            echo "::error::The tag tools-$RELEASE already exists"
+            exit 1
+          fi
+          echo "label=$RELEASE" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built in the PyPA manylinux images, the binaries run on any
+          # distribution with glibc 2.28 or newer
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+          # Also runs on Windows on ARM through emulation, there is no
+          # TensorFlow for Windows on ARM
+          - platform: windows-x86_64
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 120
+    env:
+      ARCHIVE: abng-tools-${{ needs.prepare.outputs.label }}-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/downloads
+          key: tools-downloads-${{ matrix.platform }}-${{ hashFiles('scripts/build-binaries.*') }}
+          restore-keys: tools-downloads-${{ matrix.platform }}-
+
+      - name: Install nasm
+        if: matrix.platform == 'linux-x86_64'
+        run: dnf install -y nasm || echo "nasm isn't available, building without it"
+
+      - name: Install nasm
+        if: matrix.platform == 'macos-x86_64'
+        run: brew install nasm || echo "nasm isn't available, building without it"
+
+      - name: Build
+        if: runner.os != 'Windows'
+        run: scripts/build-binaries.sh
+
+      - name: Build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-binaries.ps1
+
+      - name: Test
+        if: runner.os != 'Windows'
+        run: python3 scripts/test-binaries.py "bin/${{ matrix.platform }}"
+
+      - name: Test
+        if: runner.os == 'Windows'
+        run: python scripts/test-binaries.py "bin/${{ matrix.platform }}"
+
+      - name: Package
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          XZ_OPT=-T0 tar -C bin -cJf "dist/$ARCHIVE.tar.xz" "${{ matrix.platform }}"
+
+      - name: Package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -Path "bin\${{ matrix.platform }}" -DestinationPath "dist\$env:ARCHIVE.zip"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Publish tools-${{ inputs.release }}
+    if: github.event_name == 'workflow_dispatch' && inputs.release != ''
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: abng-tools-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum abng-tools-* | tee SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/abng-tools-*
+
+      - name: Publish
+        env:
+          RELEASE: ${{ needs.prepare.outputs.label }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat > notes.md <<EOF
+          Analysis tools release $RELEASE, built from $GITHUB_SHA.
+
+          Extract the archive for your platform into the plugin's \`bin/\` directory, e.g.
+
+          \`\`\`sh
+          tar -xJf abng-tools-$RELEASE-linux-x86_64.tar.xz -C ~/.local/share/MusicBrainz/Picard/plugins3/acousticbrainz_ng_*/bin
+          \`\`\`
+
+          \`picard-cli plugins info AcousticBrainz-ng\` shows where the plugin is installed. Check the downloads with \`sha256sum -c SHA256SUMS\` or \`gh attestation verify <file> -R $GH_REPO\`.
+
+          The Linux builds need glibc 2.28 or newer, the macOS builds macOS 12 or newer. The Windows build also runs on Windows on ARM.
+          EOF
+          gh release create "tools-$RELEASE" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "Analysis tools $RELEASE" \
+            --notes-file notes.md \
+            --latest=false
