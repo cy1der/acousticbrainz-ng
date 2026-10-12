@@ -30,23 +30,23 @@ Settings from the Picard 2 version of the plugin are migrated automatically, exc
 
 ## Analysis tools
 
-The plugin uses a few small programs built on [Essentia](https://essentia.upf.edu) (sources in [`extractors/`](./extractors)), and FFmpeg for ReplayGain. The tools include audio-only `ffmpeg` and `ffprobe` programs, the plugin uses them unless the FFmpeg path is set in the plugin options page, and falls back to an FFmpeg on the `PATH`. They are versioned separately from the plugin since they rarely change, this version of the plugin needs the **`tools-1`** release.
+The plugin uses a few small programs built on [Essentia](https://essentia.upf.edu) (sources in [`extractors/`](./extractors)), and FFmpeg for ReplayGain. The tools include audio-only `ffmpeg` and `ffprobe` programs, the plugin uses them unless the FFmpeg path is set in the plugin options page, and falls back to an FFmpeg on the `PATH`. They are versioned separately from the plugin since they rarely change, this version of the plugin needs the **`tools-2`** release.
 
 The plugin looks for them in `bin/<platform>/` in its install directory, `picard-cli plugins info AcousticBrainz-ng` shows where that is. When they are somewhere else, set the binaries path in the plugin options page.
 
 ### Prebuilt
 
-Click **Install tools** in the plugin options page (Options → Plugins → AcousticBrainz-ng). It downloads the tools for your platform from the [`tools-1` release](https://github.com/cy1der/acousticbrainz-ng/releases/tag/tools-1), checks them against the checksums pinned in the plugin and installs them. It uses Picard's proxy settings, only HTTP proxies are supported.
+Click **Install tools** in the plugin options page (Options → Plugins → AcousticBrainz-ng). It downloads the tools for your platform from the [`tools-2` release](https://github.com/cy1der/acousticbrainz-ng/releases/tag/tools-2), checks them against the checksums pinned in the plugin and installs them. It uses Picard's proxy settings, only HTTP proxies are supported.
 
 To install them manually instead, download the archive for your platform and extract it into the plugin's `bin/` directory, it contains a `<platform>/` directory:
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 (glibc 2.28 or newer) | `abng-tools-1-linux-x86_64.tar.xz` |
-| Linux ARM64 (glibc 2.28 or newer) | `abng-tools-1-linux-arm64.tar.xz` |
-| macOS Apple Silicon (12 or newer) | `abng-tools-1-macos-arm64.tar.xz` |
-| macOS Intel (12 or newer) | `abng-tools-1-macos-x86_64.tar.xz` |
-| Windows x86_64, also Windows on ARM | `abng-tools-1-windows-x86_64.zip` |
+| Linux x86_64 (glibc 2.28 or newer) | `abng-tools-2-linux-x86_64.tar.xz` |
+| Linux ARM64 (glibc 2.28 or newer) | `abng-tools-2-linux-arm64.tar.xz` |
+| macOS Apple Silicon (12 or newer) | `abng-tools-2-macos-arm64.tar.xz` |
+| macOS Intel (12 or newer) | `abng-tools-2-macos-x86_64.tar.xz` |
+| Windows x86_64, also Windows on ARM | `abng-tools-2-windows-x86_64.zip` |
 
 The archives are built by GitHub Actions, check them with `sha256sum -c SHA256SUMS` or `gh attestation verify <archive> -R cy1der/acousticbrainz-ng`. After extracting, `python3 scripts/test-binaries.py bin/<platform>` in the plugin's install directory checks that they work.
 
@@ -91,7 +91,7 @@ Publish a new tools release when `extractors/` or the dependencies in the build 
 1. Run the **Analysis tools** workflow from the Actions tab with the next release number, e.g. `2`. It builds and tests the tools on every platform, then publishes the `tools-2` release with checksums and build provenance. Release numbers are plain integers, Picard would mistake tags like `tools-v2.0.0` for plugin versions.
 2. Update the release number in this README and in `TOOLS_RELEASE` in `constants.py`, and copy the checksums from the release's `SHA256SUMS` to `TOOLS_CHECKSUMS` in `constants.py`. The install button only accepts archives matching these checksums.
 
-Pushes and pull requests that change the tools run the same builds without publishing anything.
+Pull requests that change the tools run the same builds without publishing anything.
 
 ## License
 

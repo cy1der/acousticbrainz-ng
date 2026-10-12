@@ -33,7 +33,7 @@ REQUIRED_BINARIES: List[str] = [
 
 # The release of the tools (GitHub release tools-<number>) this version of the
 # plugin needs, see "Analysis tools" in the README
-TOOLS_RELEASE = 1
+TOOLS_RELEASE = 2
 
 TOOLS_URL = "https://github.com/cy1der/acousticbrainz-ng/releases/download/tools-{release}/{name}"
 
@@ -41,11 +41,11 @@ TOOLS_URL = "https://github.com/cy1der/acousticbrainz-ng/releases/download/tools
 # SHA256SUMS. Pinned here so that a download is only trusted if it matches
 # what this version of the plugin expects
 TOOLS_CHECKSUMS: Dict[str, str] = {
-    "linux-x86_64": "1e5c6437b7a6522536b54bc3035e2f1dc49ea8b59a8aa301d5186676bf5d11c6",
-    "linux-arm64": "10a23fb1f0df0f233c37ec92f8c38fc1ee33ac4d0a4ad500cb49b085bd3f0743",
-    "macos-arm64": "c953834a5d22d30c1303c8687c49443e627483a06de4beeb6578236dcff55b0b",
-    "macos-x86_64": "d434ffad7d6f610762853313c6a7c88ffaf45214133070411165f9510c54c31c",
-    "windows-x86_64": "09b16158cf62660035526103e66dc8768497da4515c554da1e239f177a21ad89",
+    "linux-x86_64": "33a6a060fdd17481ffd4d5a906e40b72694081b48d63fe361143cfbf569ddaea",
+    "linux-arm64": "d4c3b19880d4259480a32e9fae6ae50948efd944397cfe6c48a4d6caf9752e5a",
+    "macos-arm64": "8a7cf1208c6821f6cea846aa8517b479adcf498f2ab016726e44e06ec979c922",
+    "macos-x86_64": "0cbb02499508004563cf5d62b15b458c09aa433f60f221778596819ae70aadc3",
+    "windows-x86_64": "9cdce96d1589af532f8cc0e70cd40030b74753e4e35cbb0498a12f0621cc36a4",
 }
 
 # Platforms without their own build that can run another platform's tools

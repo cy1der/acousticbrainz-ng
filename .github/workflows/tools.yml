@@ -1,6 +1,6 @@
 # Builds the analysis tools (extractors/) for every supported platform.
 #
-# Pushes and pull requests that change the tools only build and test them.
+# Pull requests that change the tools only build and test them.
 # Running the workflow manually with a release number also publishes them as
 # the GitHub release tools-<number>, see "Releasing the analysis tools" in the
 # README.
