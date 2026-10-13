@@ -2,11 +2,11 @@
 
 This plugin is not affiliated with the [AcousticBrainz](https://acousticbrainz.org) project.
 
-## Note
-
 This branch targets Picard 3 (plugin API v3). For Picard 2, use the [`apiv2`](https://github.com/cy1der/acousticbrainz-ng/tree/apiv2) branch.
 
-The analysis tools are built and tested on every supported platform by GitHub Actions, but the plugin itself hasn't been tested in Picard on macOS and Windows yet. Earlier versions of the plugin crashed on Windows with an access violation (exit code 3221225477), if you run into this or have a fix, please let me know.
+## Note
+
+The analysis tools are built and tested on every supported platform by GitHub Actions, but the plugin itself hasn't been tested in Picard on macOS yet. If you have a Mac, please let me know if this plugin works on macOS or not.
 
 ## Features
 
