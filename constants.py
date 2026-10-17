@@ -65,6 +65,12 @@ TOOLS_PLATFORM_ALIASES: Dict[str, str] = {
     "windows-arm64": "windows-x86_64",
 }
 
+# Which GPU the tools use when there are several, see abng_musicnn's
+# --gpu-preference: "high-performance" prefers a discrete one, "low-power" an
+# integrated one
+GPU_PREFERENCES = ("high-performance", "low-power")
+DEFAULT_GPU_PREFERENCE = "high-performance"
+
 # Name of the WebGPU execution provider library in the "gpu" tools
 WEBGPU_LIBRARIES = ("libonnxruntime_providers_webgpu.so", "onnxruntime_providers_webgpu.dll")
 
@@ -111,6 +117,7 @@ PLUGIN_OPTIONS: List[Tuple[str, Union[str, int, bool], Union[Tuple[int, int], No
     ("save_fingerprint", False, None),
     ("auto_apply_cached", True, None),
     ("use_gpu", False, None),
+    ("gpu_preference", DEFAULT_GPU_PREFERENCE, None),
 ]
 
 # Option names used by the Picard 2 version of this plugin, stored in the

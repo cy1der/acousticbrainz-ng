@@ -8,6 +8,8 @@ from typing import Optional
 from picard.plugin3.api import PluginApi
 from PyQt6 import QtCore
 
+from .constants import DEFAULT_GPU_PREFERENCE, GPU_PREFERENCES
+
 try:
     from picard.const.appdirs import cache_folder as _picard_cache_folder
 except ImportError:
@@ -30,6 +32,7 @@ class Settings:
     save_fingerprint: bool
     auto_apply_cached: bool
     use_gpu: bool
+    gpu_preference: str
 
 
 def exe(name: str) -> str:
@@ -93,4 +96,5 @@ def read_settings(api: PluginApi) -> Settings:
         save_fingerprint=cfg["analyze_optional"] and cfg["save_fingerprint"],
         auto_apply_cached=cfg["auto_apply_cached"],
         use_gpu=cfg["use_gpu"],
+        gpu_preference=cfg["gpu_preference"] if cfg["gpu_preference"] in GPU_PREFERENCES else DEFAULT_GPU_PREFERENCE,
     )

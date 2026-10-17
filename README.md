@@ -6,11 +6,11 @@ This branch is for Picard 3. For Picard 2, use the [`apiv2`](https://github.com/
 
 ## Getting started
 
-1. Install the plugin from Picard's plugin options with `https://github.com/cy1der/acousticbrainz-ng` as the URL and `v3.3.0` as the ref, or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng --ref v3.3.0`
+1. Install the plugin from Picard's plugin options with `https://github.com/cy1der/acousticbrainz-ng` as the URL and `v3.3.1` as the ref, or with `picard-cli plugins install https://github.com/cy1der/acousticbrainz-ng --ref v3.3.1`
 2. Enable it, open its options page (**Options → Plugins → AcousticBrainz-ng**) and click **Install tools**
 3. Select albums, tracks, clusters or files and use **Plugins → AcousticBrainz-ng → Analyze** from the context menu
 
-Installed from a release tag, Picard updates the plugin to newer releases. An install that follows the development branch can be switched with `picard-cli plugins switch-ref AcousticBrainz-ng v3.3.0`.
+Installed from a release tag, Picard updates the plugin to newer releases. An install that follows the development branch can be switched with `picard-cli plugins switch-ref AcousticBrainz-ng v3.3.1`.
 
 ## Usage
 
@@ -26,6 +26,8 @@ Check **Use the GPU for MusicNN** in the options page and click **Install GPU to
 - **Windows:** any GPU with DirectX 12 (NVIDIA, AMD, Intel)
 - **Linux:** any GPU with a Vulkan driver (NVIDIA, AMD, Intel)
 - **macOS:** Apple Silicon and Intel Macs, through CoreML
+
+With both an integrated and a discrete GPU, the **GPU** setting below the option chooses between them, on Windows and Linux. The discrete GPU is used by default.
 
 Most of the analysis time is spent in the MusicNN models. For a 4-minute track they take about 9 s on an RTX 4060 laptop GPU and 15 s on a 16-thread laptop CPU. Integrated GPUs are about as fast as the CPU, but leave it free for the rest of the analysis.
 
