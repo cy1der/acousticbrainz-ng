@@ -8,9 +8,9 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from .constants import ENV, WEBGPU_LIBRARIES
+from .constants import DEFAULT_GPU_PREFERENCE, ENV, WEBGPU_LIBRARIES
 from .settings import exe
 
 VENDORS = {
@@ -164,6 +164,75 @@ def tools_support_gpu(binaries_path: str) -> bool:
 
 
 @dataclass
+class ToolsDevice:
+    name: str
+    discrete: bool
+
+
+def tools_gpus(binaries_path: str) -> Optional[List[ToolsDevice]]:
+    """The GPUs the tools in binaries_path can use, None when they can't tell
+    (macOS, or tools without GPU support)"""
+    if not needs_gpu_tools() or not tools_support_gpu(binaries_path):
+        return None
+    # The tools only know the PCI IDs, Windows has the names
+    names = detect_gpus().names if sys.platform == "win32" else []
+    devices = []
+    for line in _run([os.path.join(binaries_path, exe("abng_musicnn")), "--list-devices"]).splitlines():
+        try:
+            device = json.loads(line)
+        except ValueError:
+            continue
+        vendor_id, device_id = device.get("vendor_id", ""), device.get("device_id", "")
+        if sys.platform == "win32":
+            vendor = VENDORS.get(vendor_id, "GPU")
+            name = next((name for name in names if vendor.lower() in name.lower()), f"{vendor} GPU")
+        else:
+            name = pci_name(vendor_id, device_id)
+        devices.append(ToolsDevice(name, bool(device.get("discrete"))))
+    return devices
+
+
+# Whether abng_musicnn supports --gpu-preference (tools-4 and newer), by path
+# and modification time of the binary
+_gpu_preference_support: Dict[Tuple[str, float], bool] = {}
+
+
+def tools_support_gpu_preference(binaries_path: str) -> bool:
+    """Whether the tools in binaries_path can choose between several GPUs"""
+    binary = os.path.join(binaries_path, exe("abng_musicnn"))
+    try:
+        key = (binary, os.path.getmtime(binary))
+    except OSError:
+        return False
+    if key not in _gpu_preference_support:
+        # Without arguments the tool prints its usage, which lists its options
+        try:
+            result = subprocess.run(
+                [binary],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=ENV,
+                timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            _gpu_preference_support[key] = "--gpu-preference" in result.stdout + result.stderr
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return _gpu_preference_support[key]
+
+
+def gpu_preference_arguments(binaries_path: str, preference: str) -> List[str]:
+    """The abng_musicnn arguments for the GPU preference. Empty for the default,
+    or when the tools are too old to know it"""
+    if needs_gpu_tools() and preference != DEFAULT_GPU_PREFERENCE and tools_support_gpu_preference(binaries_path):
+        return ["--gpu-preference", preference]
+    return []
+
+
+@dataclass
 class ToolsGpu:
     # Whether a test run of the tools used the GPU
     used: bool
@@ -183,28 +252,20 @@ def _write_silence(path: str, seconds: int = 5, rate: int = 16000) -> None:
         output.write(header + data)
 
 
-def check_tools_gpu(binaries_path: str, model_path: str) -> ToolsGpu:
+def check_tools_gpu(binaries_path: str, model_path: str, preference: str = DEFAULT_GPU_PREFERENCE) -> ToolsGpu:
     """Runs a model with the tools in binaries_path on the GPU, to find out
     whether they can use it"""
     binary = os.path.join(binaries_path, exe("abng_musicnn"))
-    devices = None
-    if needs_gpu_tools():
-        devices = []
-        for line in _run([binary, "--list-devices"]).splitlines():
-            try:
-                device = json.loads(line)
-            except ValueError:
-                continue
-            vendor_id, device_id = device.get("vendor_id", ""), device.get("device_id", "")
-            name = pci_name(vendor_id, device_id) if sys.platform.startswith("linux") else VENDORS.get(vendor_id, "GPU")
-            devices.append(name + (" (discrete)" if device.get("discrete") else ""))
+    gpus = tools_gpus(binaries_path)
+    devices = None if gpus is None else [gpu.name + (" (discrete)" if gpu.discrete else "") for gpu in gpus]
 
     with tempfile.TemporaryDirectory(prefix="abng-gpu-check-") as directory:
         audio = os.path.join(directory, "silence.wav")
         _write_silence(audio)
         try:
             result = subprocess.run(
-                [binary, "--device", "gpu", audio, model_path, os.path.join(directory, "output.json")],
+                [binary, "--device", "gpu", *gpu_preference_arguments(binaries_path, preference),
+                 audio, model_path, os.path.join(directory, "output.json")],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,

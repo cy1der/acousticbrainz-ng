@@ -17,7 +17,7 @@ from .constants import (
     REQUIRED_MODELS,
 )
 from .fingerprint import fingerprint_png
-from .gpu import tools_support_gpu
+from .gpu import gpu_preference_arguments, tools_support_gpu
 from .process import AnalysisCancelled, ProcessRunner
 from .settings import Settings, exe
 
@@ -98,9 +98,10 @@ class Essentia:
         threads = max(1, (os.cpu_count() or 1) // (processes * settings.max_concurrent_analyses))
         batch_size = MUSICNN_GPU_BATCH_SIZE if gpu else MUSICNN_CPU_BATCH_SIZE
         groups = [pending[i::processes] for i in range(processes)]
+        device_arguments = ["--device", "gpu", *gpu_preference_arguments(settings.binaries_path, settings.gpu_preference)] if gpu else ["--device", "cpu"]
 
         def run_group(group: List[Tuple[str, str, str]]) -> None:
-            arguments = [musicnn_binary_path, "--device", "gpu" if gpu else "cpu", "--batch-size", str(batch_size), "--threads", str(threads), file]
+            arguments = [musicnn_binary_path, *device_arguments, "--batch-size", str(batch_size), "--threads", str(threads), file]
             for _model_name, model_path, output_file_path in group:
                 arguments += [model_path, output_file_path]
             try:

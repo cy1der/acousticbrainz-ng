@@ -9,6 +9,7 @@ from PyQt6 import QtWidgets, QtCore
 from .analyzer import get_instance
 from .constants import (
     BUILD_INSTRUCTIONS,
+    DEFAULT_GPU_PREFERENCE,
     OPTIONAL_MODELS,
     PLUGIN_NAME,
     PLUGIN_OPTIONS,
@@ -16,7 +17,15 @@ from .constants import (
     REQUIRED_MODELS,
     TOOLS_RELEASE,
 )
-from .gpu import GpuInfo, check_tools_gpu, detect_gpus, needs_gpu_tools, tools_support_gpu
+from .gpu import (
+    GpuInfo,
+    check_tools_gpu,
+    detect_gpus,
+    needs_gpu_tools,
+    tools_gpus,
+    tools_support_gpu,
+    tools_support_gpu_preference,
+)
 from .installer import (
     InstallCancelled,
     InstallError,
@@ -42,6 +51,9 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         super().__init__(parent)
         # Found in the background, None until then
         self.gpus = None
+        # The GPUs of the installed tools, and whether they can choose one
+        self.tools_devices = None
+        self.gpu_preference_supported = False
         self.setup_ui()
 
     def _create_path_input_layout(self, line_edit: QtWidgets.QLineEdit, browse_callback, check_callback=None) -> QtWidgets.QHBoxLayout:
@@ -100,6 +112,21 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.gpu_status_label.setWordWrap(True)
         self.gpu_status_label.setIndent(20)
 
+        # Which GPU the tools pick when there are several. CoreML on macOS
+        # picks the GPU itself
+        self.gpu_preference_label = QtWidgets.QLabel("GPU:", self)
+        self.gpu_preference_combo = QtWidgets.QComboBox(self)
+        self.gpu_preference_combo.addItem("Fastest (discrete GPU)", "high-performance")
+        self.gpu_preference_combo.addItem("Power saving (integrated GPU)", "low-power")
+        gpu_preference_layout = QtWidgets.QHBoxLayout()
+        gpu_preference_layout.setContentsMargins(20, 0, 0, 0)
+        gpu_preference_layout.addWidget(self.gpu_preference_label)
+        gpu_preference_layout.addWidget(self.gpu_preference_combo)
+        gpu_preference_layout.addStretch()
+        for widget in (self.gpu_preference_label, self.gpu_preference_combo):
+            widget.setVisible(needs_gpu_tools())
+        self._update_gpu_preference_state()
+
         musicnn_workers_layout = QtWidgets.QHBoxLayout()
         concurrent_analyses_layout = QtWidgets.QHBoxLayout()
         rg_reference_layout = QtWidgets.QHBoxLayout()
@@ -146,6 +173,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         options_layout.addWidget(self.auto_apply_cached_checkbox)
         options_layout.addWidget(self.use_gpu_checkbox)
         options_layout.addWidget(self.gpu_status_label)
+        options_layout.addLayout(gpu_preference_layout)
         options_layout.addLayout(concurrent_analyses_layout)
         options_layout.addLayout(musicnn_workers_layout)
 
@@ -172,6 +200,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.musicnn_workers_input.valueChanged.connect(update_concurrent_processes)
         self.use_gpu_checkbox.toggled.connect(update_concurrent_processes)
         self.use_gpu_checkbox.toggled.connect(lambda _checked: self._update_tools_status())
+        self.use_gpu_checkbox.toggled.connect(lambda _checked: self._update_gpu_preference_state())
 
         options_layout.addLayout(rg_reference_layout)
 
@@ -347,6 +376,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             return
         dialog.close()
         self._update_tools_status()
+        # The new tools might find other GPUs or choose between them
+        self._detect_gpus()
 
         if cancelled:
             return
@@ -368,15 +399,23 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             QtWidgets.QMessageBox.information(self, "Install tools", f"Installed the tools to {destination}.")
 
     def _detect_gpus(self) -> None:
+        binaries_path = resolve_path(self.api, "binaries_path", self.binaries_path_input.text())
+
         def run() -> None:
-            thread.to_main(self._gpus_detected, detect_gpus())
+            # Runs the tools, which takes a moment
+            gpus = detect_gpus()
+            devices = tools_gpus(binaries_path)
+            supported = tools_support_gpu_preference(binaries_path)
+            thread.to_main(self._gpus_detected, gpus, devices, supported)
 
         threading.Thread(target=run, name="abng-detect-gpus", daemon=True).start()
 
-    def _gpus_detected(self, gpus: GpuInfo) -> None:
+    def _gpus_detected(self, gpus: GpuInfo, devices, gpu_preference_supported: bool) -> None:
         if self.deleted:
             return
         self.gpus = gpus
+        self.tools_devices = devices
+        self.gpu_preference_supported = gpu_preference_supported
         if not gpus.names:
             self.gpu_status_label.setText("No supported GPU found")
         elif gpus.problem:
@@ -385,6 +424,36 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             self.gpu_status_label.setText(f"Found {', '.join(gpus.names)}")
         # Kept enabled while checked, so that it can be turned off again
         self.use_gpu_checkbox.setEnabled(gpus.usable or self.use_gpu_checkbox.isChecked())
+        self._update_gpu_preference_state()
+
+    def _update_gpu_preference_state(self) -> None:
+        # Name the GPUs when the tools can tell the discrete from the integrated ones
+        discrete = [device.name for device in self.tools_devices or [] if device.discrete]
+        integrated = [device.name for device in self.tools_devices or [] if not device.discrete]
+        if discrete and integrated:
+            self.gpu_preference_combo.setItemText(0, f"Fastest ({', '.join(discrete)})")
+            self.gpu_preference_combo.setItemText(1, f"Power saving ({', '.join(integrated)})")
+        else:
+            self.gpu_preference_combo.setItemText(0, "Fastest (discrete GPU)")
+            self.gpu_preference_combo.setItemText(1, "Power saving (integrated GPU)")
+
+        several = self.gpus is not None and len(self.gpus.names) > 1
+        if not several:
+            tooltip = "Only one GPU was found"
+        elif not self.gpu_preference_supported:
+            tooltip = f"Choosing the GPU needs newer tools, install the GPU tools of tools-{TOOLS_RELEASE}"
+        else:
+            tooltip = "Which GPU to use. The discrete GPU is faster, the integrated GPU uses less power"
+        enabled = several and self.gpu_preference_supported and self.use_gpu_checkbox.isChecked()
+        self.gpu_preference_label.setEnabled(enabled)
+        self.gpu_preference_combo.setEnabled(enabled)
+        self.gpu_preference_combo.setToolTip(tooltip)
+
+    def _gpu_preference(self) -> str:
+        """The GPU preference to use, the default unless it can be chosen"""
+        if self.gpu_preference_combo.isEnabled():
+            return self.gpu_preference_combo.currentData()
+        return DEFAULT_GPU_PREFERENCE
 
     def _update_fingerprint_state(self, checked):
         if not checked:
@@ -449,7 +518,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         try:
-            check = check_tools_gpu(binaries_path, model)
+            check = check_tools_gpu(binaries_path, model, self._gpu_preference())
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         found = ""
@@ -537,11 +606,11 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.models_path_input.setText(cfg["models_path"])
         self.cache_path_input.setText(cfg["cache_path"])
 
+        index = self.gpu_preference_combo.findData(cfg["gpu_preference"])
+        self.gpu_preference_combo.setCurrentIndex(max(index, 0))
+
         self._update_tools_status()
-        if self.gpus is None:
-            self._detect_gpus()
-        else:
-            self._gpus_detected(self.gpus)
+        self._detect_gpus()
 
     def save(self):
         self._check_binaries()
@@ -555,6 +624,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         cfg["auto_apply_cached"] = self.auto_apply_cached_checkbox.isChecked()
         cfg["save_fingerprint"] = self.save_fingerprint_checkbox.isChecked()
         cfg["use_gpu"] = self.use_gpu_checkbox.isChecked()
+        cfg["gpu_preference"] = self.gpu_preference_combo.currentData()
 
         cfg["max_musicnn_workers"] = self.musicnn_workers_input.value()
         cfg["max_concurrent_analyses"] = self.concurrent_analyses_input.value()

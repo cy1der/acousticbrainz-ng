@@ -63,12 +63,19 @@ const int BANDS = 96;
 
 const char* WEBGPU_EP = "WebGpuExecutionProvider";
 
+// Which GPU the WebGPU execution provider picks when there are several,
+// high-performance prefers a discrete one, low-power an integrated one
+string gpuPreference = "high-performance";
+
 void printUsage(const char* program) {
   cerr << "Usage: " << program << " [options] input_audiofile model.onnx output_jsonfile [model.onnx output_jsonfile ...]" << endl;
   cerr << "       " << program << " --list-devices" << endl;
   cerr << "  --device cpu|gpu: where to run the models (default: cpu). gpu uses CoreML on macOS and the" << endl;
   cerr << "                    WebGPU execution provider next to this program elsewhere, and falls back" << endl;
   cerr << "                    to the CPU when the GPU can't be used" << endl;
+  cerr << "  --gpu-preference high-performance|low-power: which GPU to use when there are several, a" << endl;
+  cerr << "                    discrete one or an integrated one (default: high-performance). Ignored" << endl;
+  cerr << "                    on macOS, CoreML picks the GPU itself" << endl;
   cerr << "  --batch-size N:   number of patches per model run (default: 4). Lower values reduce the" << endl;
   cerr << "                    peak memory usage" << endl;
   cerr << "  --threads N:      number of CPU threads per model run (default: all cores)" << endl;
@@ -205,11 +212,11 @@ Ort::SessionOptions sessionOptions(Ort::Env& env, bool& gpu, int threads) {
                                                {"MLComputeUnits", "CPUAndGPU"},
                                                {"AllowLowPrecisionAccumulationOnGPU", "0"}});
 #else
-    // The WebGPU execution provider picks the GPU itself, preferring a
-    // discrete one. Without preserveDevice it recreates the device for each
+    // The WebGPU execution provider picks the GPU itself, by the power
+    // preference. Without preserveDevice it recreates the device for each
     // model, which takes longer than running it
     vector<Ort::ConstEpDevice> devices = {webgpuDevices(env).front()};
-    unordered_map<string, string> providerOptions = {{"preserveDevice", "1"}};
+    unordered_map<string, string> providerOptions = {{"preserveDevice", "1"}, {"powerPreference", gpuPreference}};
     options.AppendExecutionProvider_V2(env, devices, providerOptions);
     // Fail instead of silently running parts of the models on the CPU
     options.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
@@ -333,6 +340,13 @@ int main(int argc, char* argv[]) {
         return 1;
       }
       gpu = device == "gpu";
+    }
+    else if (arg == "--gpu-preference" && i + 1 < argc) {
+      gpuPreference = argv[++i];
+      if (gpuPreference != "high-performance" && gpuPreference != "low-power") {
+        printUsage(argv[0]);
+        return 1;
+      }
     }
     else if (arg == "--list-devices") {
       list = true;

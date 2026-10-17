@@ -33,7 +33,7 @@ REQUIRED_BINARIES: List[str] = [
 
 # The release of the tools (GitHub release tools-<number>) this version of the
 # plugin needs, see CONTRIBUTING.md
-TOOLS_RELEASE = 3
+TOOLS_RELEASE = 4
 
 TOOLS_URL = "https://github.com/cy1der/acousticbrainz-ng/releases/download/tools-{release}/{name}"
 
@@ -47,16 +47,16 @@ TOOLS_VARIANTS = ("cpu", "gpu")
 # matches what this version of the plugin expects
 TOOLS_CHECKSUMS: Dict[str, Dict[str, str]] = {
     "cpu": {
-        "linux-x86_64": "1ef016d923791c11c9fc45858e40221cccc95ac24fff0c8a75dfc28eef3afa49",
-        "linux-arm64": "9847aa383bd211037517f24e0637e89d0af96fb6c5ff098ce2aefc5def29fc37",
-        "macos-arm64": "ea4c402b389431f62c33b6d3e5ec08de4c1e434b2065afa0fa2ba65f68055dc8",
-        "macos-x86_64": "e05300e82e75c887567cedb6fc5f0f2aeb0658b721f26be495f485dd1c10d43e",
-        "windows-x86_64": "0230a61e7e771b4c02450d068b618819c32d1e9190c2e42e3d7bde31661a8eda",
+        "linux-x86_64": "ec1e618380c9665950a08f459ad1cbd54f280c3b215505e393cab8e87a568ff8",
+        "linux-arm64": "c41502984b7dc02db3f15dfa431cafb2002a670ea596e7a25217f40545003625",
+        "macos-arm64": "bf40d69a5810960d7a6bc9c26bae168a8781451d63aae00a7f561a964bf0b007",
+        "macos-x86_64": "84d353324af56dc1f7fc07f7c2f131dd90120bad3460832bd879a7568205e550",
+        "windows-x86_64": "92723610889d20dde6e9a4fe1cd49b24048f2197731e03c4ac22f13fd2468a4b",
     },
     "gpu": {
-        "linux-x86_64": "41f00ff1dc11d3815473d6d46d4e7ca173dbd4544aacfcd48268106b2ca16960",
-        "linux-arm64": "d2015023ab98d8b0520e922569f60d8c11abd3dd91f5bb1fb37a586356c0b524",
-        "windows-x86_64": "8106e7939c170388b27b3475784335ddc48a2b003ecce2209de5a5b69196c70c",
+        "linux-x86_64": "25f3ce7bd786b37a68f82c0671c5b58d25f6914aa6ff53b8f2c00831ce5ca6c8",
+        "linux-arm64": "e5f3b69fb98030bbf12311ab007afee24fb0631710d7327cd5dfc7995905f0d4",
+        "windows-x86_64": "1414de5ff463383b7a2759de88085c65a3b37aac473c19b6ed35a848401fc25b",
     },
 }
 
@@ -64,6 +64,12 @@ TOOLS_CHECKSUMS: Dict[str, Dict[str, str]] = {
 TOOLS_PLATFORM_ALIASES: Dict[str, str] = {
     "windows-arm64": "windows-x86_64",
 }
+
+# Which GPU the tools use when there are several, see abng_musicnn's
+# --gpu-preference: "high-performance" prefers a discrete one, "low-power" an
+# integrated one
+GPU_PREFERENCES = ("high-performance", "low-power")
+DEFAULT_GPU_PREFERENCE = "high-performance"
 
 # Name of the WebGPU execution provider library in the "gpu" tools
 WEBGPU_LIBRARIES = ("libonnxruntime_providers_webgpu.so", "onnxruntime_providers_webgpu.dll")
@@ -111,6 +117,7 @@ PLUGIN_OPTIONS: List[Tuple[str, Union[str, int, bool], Union[Tuple[int, int], No
     ("save_fingerprint", False, None),
     ("auto_apply_cached", True, None),
     ("use_gpu", False, None),
+    ("gpu_preference", DEFAULT_GPU_PREFERENCE, None),
 ]
 
 # Option names used by the Picard 2 version of this plugin, stored in the
