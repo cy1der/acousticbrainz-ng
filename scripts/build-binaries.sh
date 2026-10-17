@@ -382,11 +382,11 @@ EOF
   [ -n "$(ls "$2"/libonnxruntime_providers_webgpu.* 2>/dev/null)" ] || die "No WebGPU execution provider in $1"
 }
 
-# lookup <table name>: prints the entry of this platform in the table, if any
+# lookup <table entries...>: prints the entry of this platform, if any. Takes
+# the entries instead of the table's name, macOS still has bash 3.2
 lookup() {
-  local -n table="$1"
   local entry
-  for entry in "${table[@]}"; do
+  for entry in "$@"; do
     if [ "${entry%%|*}" = "$PLATFORM" ]; then
       echo "$entry"
     fi
@@ -408,7 +408,7 @@ if [ "$FFMPEG_ONLY" = 1 ]; then
 fi
 
 if [ -z "$ONNXRUNTIME_DIR" ]; then
-  onnxruntime_entry="$(lookup ONNXRUNTIME)"
+  onnxruntime_entry="$(lookup "${ONNXRUNTIME[@]}")"
   [ -n "$onnxruntime_entry" ] || die "There is no ONNX Runtime library for $PLATFORM, pass one with --onnxruntime"
 
   IFS='|' read -r _ onnxruntime_version onnxruntime_url onnxruntime_checksum <<<"$onnxruntime_entry"
@@ -435,7 +435,7 @@ fi
 [ -e "$ONNXRUNTIME_LIBRARY" ] || die "No ONNX Runtime library at $ONNXRUNTIME_LIBRARY"
 
 if [ "$WEBGPU" = 1 ]; then
-  webgpu_entry="$(lookup WEBGPU_EP)"
+  webgpu_entry="$(lookup "${WEBGPU_EP[@]}")"
   [ -n "$webgpu_entry" ] || die "There is no WebGPU execution provider for $PLATFORM"
   IFS='|' read -r _ webgpu_version webgpu_url webgpu_checksum <<<"$webgpu_entry"
   WEBGPU_DIR="$WORK_DIR/webgpu-$PLATFORM-$webgpu_version"
