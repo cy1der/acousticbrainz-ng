@@ -46,8 +46,18 @@ TOOLS_VARIANTS = ("cpu", "gpu")
 # release's SHA256SUMS. Pinned here so that a download is only trusted if it
 # matches what this version of the plugin expects
 TOOLS_CHECKSUMS: Dict[str, Dict[str, str]] = {
-    "cpu": {},
-    "gpu": {},
+    "cpu": {
+        "linux-x86_64": "1ef016d923791c11c9fc45858e40221cccc95ac24fff0c8a75dfc28eef3afa49",
+        "linux-arm64": "9847aa383bd211037517f24e0637e89d0af96fb6c5ff098ce2aefc5def29fc37",
+        "macos-arm64": "ea4c402b389431f62c33b6d3e5ec08de4c1e434b2065afa0fa2ba65f68055dc8",
+        "macos-x86_64": "e05300e82e75c887567cedb6fc5f0f2aeb0658b721f26be495f485dd1c10d43e",
+        "windows-x86_64": "0230a61e7e771b4c02450d068b618819c32d1e9190c2e42e3d7bde31661a8eda",
+    },
+    "gpu": {
+        "linux-x86_64": "41f00ff1dc11d3815473d6d46d4e7ca173dbd4544aacfcd48268106b2ca16960",
+        "linux-arm64": "d2015023ab98d8b0520e922569f60d8c11abd3dd91f5bb1fb37a586356c0b524",
+        "windows-x86_64": "8106e7939c170388b27b3475784335ddc48a2b003ecce2209de5a5b69196c70c",
+    },
 }
 
 # Platforms without their own build that can run another platform's tools
