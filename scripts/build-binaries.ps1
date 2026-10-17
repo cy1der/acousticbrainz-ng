@@ -4,10 +4,10 @@ Builds the Essentia based tools used by the plugin on Windows.
 
 .DESCRIPTION
 Builds abng_key, abng_musicnn and abng_rhythm and installs them together with
-the TensorFlow C library.
+the ONNX Runtime library.
 
 All dependencies are downloaded with verified checksums and linked statically,
-except TensorFlow. FFmpeg is a prebuilt audio-only library build made for MSVC
+except ONNX Runtime. FFmpeg is a prebuilt audio-only library build made for MSVC
 (https://github.com/wo80/ffmpeg-audio-only), building it from source requires
 MSYS2.
 
@@ -25,9 +25,13 @@ Install directory (default: bin\windows-x86_64 in the repository)
 .PARAMETER WorkDir
 Download and build directory (default: build\ in the repository)
 
-.PARAMETER TensorFlow
-Use an existing TensorFlow C library (a directory containing include\ and lib\)
+.PARAMETER OnnxRuntime
+Use an existing ONNX Runtime build (a directory containing include\ and lib\)
 instead of downloading it
+
+.PARAMETER WebGPU
+Also install the WebGPU execution provider, which runs the MusicNN models on
+the GPU (Direct3D 12)
 
 .PARAMETER FFmpeg
 Use this FFmpeg build (a directory containing include\, lib\ and bin\) instead
@@ -45,8 +49,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build-binaries.ps1
 param(
     [string]$Output = "",
     [string]$WorkDir = "",
-    [string]$TensorFlow = "",
+    [string]$OnnxRuntime = "",
     [string]$FFmpeg = "",
+    [switch]$WebGPU,
     [switch]$Clean
 )
 
@@ -63,7 +68,9 @@ $Sources = @{
     yaml          = @{ Version = '0.2.5'; Url = 'https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz'; Sha256 = 'fa240dbf262be053f3898006d502d514936c818e422afdcf33921c63bed9bf2e'; License = 'MIT' }
     libsamplerate = @{ Version = '0.2.2'; Url = 'https://github.com/libsndfile/libsamplerate/archive/refs/tags/0.2.2.tar.gz'; Sha256 = '16e881487f184250deb4fcb60432d7556ab12cb58caea71ef23960aec6c0405a'; License = 'BSD-2-Clause' }
     ffmpeg        = @{ Version = '9.0.1'; Url = 'https://github.com/wo80/ffmpeg-audio-only/releases/download/v9.0.1/ffmpeg-9.0.1-win64-static.zip'; Sha256 = 'f3bf2451419ea3114fcbd0a68155c91156b569cc4aedf56f28a30931d29bbc44'; License = 'LGPL-2.1-or-later' }
-    tensorflow    = @{ Version = '2.18.1'; Url = 'https://storage.googleapis.com/tensorflow/versions/2.18.1/libtensorflow-cpu-windows-x86_64.zip'; Sha256 = '28acdcea6c6b34828cf0e95e67802b0f3577d51bc2e8915de811b7aa0b04452d'; License = 'Apache-2.0'; StripComponents = 0 }
+    onnxruntime   = @{ Version = '1.31.0'; Url = 'https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip'; Sha256 = '3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195'; License = 'MIT' }
+    # The Python package of the WebGPU execution provider, which contains the plugin library
+    webgpu        = @{ Version = '0.4.0'; Url = 'https://files.pythonhosted.org/packages/d7/a4/c98a9e9433b3eeb576977b26c5c1cd0364f15ba9d198bb16101e7563ab06/onnxruntime_ep_webgpu-0.4.0-py3-none-win_amd64.whl'; Sha256 = '7db646669d1a2390551da675115ea125e68cb3d4d2c3a2d6e463372bf8d6ea87'; License = 'MIT'; StripComponents = 0 }
 }
 
 # The prebuilt FFmpeg doesn't include its license, take it from the same release
@@ -143,7 +150,8 @@ function Get-Download([string]$FileName, [string]$Url, [string]$Sha256) {
 function Get-Source([string]$Name) {
     # Downloads and extracts a source archive, returns its directory
     $source = $Sources[$Name]
-    $extension = if ($source.Url.EndsWith('.zip')) { 'zip' } else { 'tar.gz' }
+    # Wheels are zip archives
+    $extension = if ($source.Url.EndsWith('.zip') -or $source.Url.EndsWith('.whl')) { 'zip' } else { 'tar.gz' }
     $archive = Get-Download -FileName "$Name-$($source.Version).$extension" -Url $source.Url -Sha256 $source.Sha256
     # Most archives contain a single top-level directory, which is removed
     $strip = if ($source.ContainsKey('StripComponents')) { $source.StripComponents } else { 1 }
@@ -192,8 +200,8 @@ function Invoke-CMakeDependency([string]$Name, [string[]]$Options) {
     Assert-Success "Installing $Name"
 }
 
-if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64' -and -not $TensorFlow) {
-    throw "There is no official TensorFlow C library for $env:PROCESSOR_ARCHITECTURE, pass one with -TensorFlow"
+if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64' -and -not $OnnxRuntime) {
+    throw "Only x64 builds are supported, Windows on ARM runs them through emulation. Pass an ONNX Runtime build with -OnnxRuntime to try anyway"
 }
 
 Import-VisualStudioEnvironment
@@ -239,15 +247,18 @@ if ($FFmpeg) {
     $FFmpegDir = Get-Source ffmpeg
 }
 
-$TensorFlowProvided = [bool]$TensorFlow
-if (-not $TensorFlow) {
-    $TensorFlow = Get-Source tensorflow
+$OnnxRuntimeProvided = [bool]$OnnxRuntime
+if (-not $OnnxRuntime) {
+    $OnnxRuntime = Get-Source onnxruntime
 }
-if (-not (Test-Path (Join-Path $TensorFlow 'include\tensorflow\c\c_api.h'))) {
-    throw "No TensorFlow headers in $TensorFlow\include"
+if (-not (Test-Path (Join-Path $OnnxRuntime 'include\onnxruntime_cxx_api.h'))) {
+    throw "No ONNX Runtime headers in $OnnxRuntime\include"
 }
-if (-not (Test-Path (Join-Path $TensorFlow 'lib\tensorflow.lib'))) {
-    throw "No TensorFlow library at $TensorFlow\lib\tensorflow.lib"
+if (-not (Test-Path (Join-Path $OnnxRuntime 'lib\onnxruntime.lib'))) {
+    throw "No ONNX Runtime library at $OnnxRuntime\lib\onnxruntime.lib"
+}
+if ($WebGPU) {
+    $WebGPUDir = Get-Source webgpu
 }
 
 Write-Step 'Building tools'
@@ -273,7 +284,7 @@ $EssentiaDir = Get-Source essentia
     "-DFFTW3f_INCLUDE_DIR=$Prefix\include" "-DFFTW3f_LIBRARY=$Prefix\lib\fftw3f.lib" `
     "-Dyaml_INCLUDE_DIR=$Prefix\include" "-Dyaml_LIBRARY=$Prefix\lib\yaml.lib" `
     "-DSampleRate_INCLUDE_DIR=$Prefix\include" "-DSampleRate_LIBRARY=$Prefix\lib\samplerate.lib" `
-    "-DTensorFlow_INCLUDE_DIR=$TensorFlow\include" "-DTensorFlow_LIBRARY=$TensorFlow\lib\tensorflow.lib"
+    "-DONNXRUNTIME_INCLUDE_DIR=$OnnxRuntime\include" "-DONNXRUNTIME_LIBRARY=$OnnxRuntime\lib\onnxruntime.lib"
 Assert-Success 'Configuring the tools'
 & cmake --build $ExtractorsBuild
 Assert-Success 'Building the tools'
@@ -282,7 +293,18 @@ Write-Step "Installing to $Output"
 New-Item -ItemType Directory -Path $Output -Force | Out-Null
 & cmake --install $ExtractorsBuild --component tools --prefix $Output
 Assert-Success 'Installing the tools'
-Copy-Item (Join-Path $TensorFlow 'lib\tensorflow.dll') $Output -Force
+# Remove the libraries of a previous build, including the TensorFlow one of
+# builds before tools-3, and the WebGPU provider when building without it
+foreach ($library in 'tensorflow.dll', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll', 'onnxruntime_providers_webgpu.dll', 'dxil.dll', 'dxcompiler.dll') {
+    Remove-Item (Join-Path $Output $library) -ErrorAction SilentlyContinue
+}
+Copy-Item (Join-Path $OnnxRuntime 'lib\onnxruntime.dll') $Output -Force
+if ($WebGPU) {
+    # The provider compiles its shaders with the DirectX shader compiler next to it
+    foreach ($library in 'onnxruntime_providers_webgpu.dll', 'dxil.dll', 'dxcompiler.dll') {
+        Copy-Item (Join-Path $WebGPUDir "onnxruntime_ep_webgpu\$library") $Output -Force
+    }
+}
 
 $Programs = @()
 foreach ($program in 'ffmpeg.exe', 'ffprobe.exe') {
@@ -304,7 +326,7 @@ $LicenseDir = Join-Path $Output 'licenses'
 if (Test-Path $LicenseDir) { Remove-Item -Recurse -Force $LicenseDir }
 
 function Copy-LicenseFile([string]$Component, [string[]]$Files) {
-    # Missing files are skipped, a user-supplied TensorFlow might not include them
+    # Missing files are skipped, a user-supplied ONNX Runtime might not include them
     $directory = Join-Path $LicenseDir $Component
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     foreach ($file in $Files) {
@@ -320,7 +342,11 @@ Copy-LicenseFile 'eigen' @(Get-ChildItem (Join-Path (Get-Source eigen) 'COPYING.
 Copy-LicenseFile 'fftw' @(Join-Path (Get-Source fftw) 'COPYING')
 Copy-LicenseFile 'yaml' @(Join-Path (Get-Source yaml) 'License')
 Copy-LicenseFile 'libsamplerate' @(Join-Path (Get-Source libsamplerate) 'COPYING')
-Copy-LicenseFile 'tensorflow' @((Join-Path $TensorFlow 'LICENSE'), (Join-Path $TensorFlow 'THIRD_PARTY_TF_C_LICENSES'))
+Copy-LicenseFile 'onnxruntime' @((Join-Path $OnnxRuntime 'LICENSE'), (Join-Path $OnnxRuntime 'ThirdPartyNotices.txt'))
+if ($WebGPU) {
+    $licenses = Join-Path $WebGPUDir "onnxruntime_ep_webgpu-$($Sources.webgpu.Version).dist-info\licenses"
+    Copy-LicenseFile 'onnxruntime-ep-webgpu' @((Join-Path $licenses 'LICENSE'), (Join-Path $licenses 'ThirdPartyNotices.txt'))
+}
 
 $FFmpegLicenseDir = Join-Path $LicenseDir 'ffmpeg'
 New-Item -ItemType Directory -Path $FFmpegLicenseDir -Force | Out-Null
@@ -339,10 +365,14 @@ $notice = @(
     'directories next to this file:'
     ''
 )
-foreach ($name in 'essentia', 'eigen', 'fftw', 'yaml', 'libsamplerate', 'ffmpeg', 'tensorflow') {
+$components = @('essentia', 'eigen', 'fftw', 'yaml', 'libsamplerate', 'ffmpeg', 'onnxruntime')
+if ($WebGPU) { $components += 'webgpu' }
+foreach ($name in $components) {
     $source = $Sources[$name]
-    if ($name -eq 'tensorflow' -and $TensorFlowProvided) {
-        $notice += "- tensorflow ($($source.License)): provided by the user from $TensorFlow"
+    if ($name -eq 'onnxruntime' -and $OnnxRuntimeProvided) {
+        $notice += "- onnxruntime ($($source.License)): provided by the user from $OnnxRuntime"
+    } elseif ($name -eq 'webgpu') {
+        $notice += "- onnxruntime-ep-webgpu $($source.Version) ($($source.License)): $($source.Url)"
     } elseif ($name -eq 'ffmpeg' -and $FFmpeg) {
         # Written by build-binaries.sh --ffmpeg-only
         $sourceFile = Join-Path $FFmpegDir 'FFMPEG_SOURCE'

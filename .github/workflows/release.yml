@@ -2,8 +2,8 @@
 #
 # Picard installs and updates the plugin from the tags themselves, the release
 # adds release notes and keeps the latest plugin version, not the analysis
-# tools, as the repository's latest release. See "Releasing the plugin" in the
-# README.
+# tools, as the repository's latest release. See "Releasing the plugin" in
+# CONTRIBUTING.md.
 
 name: Plugin release
 

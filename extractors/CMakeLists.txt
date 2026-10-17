@@ -7,17 +7,22 @@ project(abng_extractors LANGUAGES C CXX)
 # dependencies.
 
 set(ESSENTIA_SOURCE_DIR "" CACHE PATH "Path to the Essentia source tree (https://github.com/wo80/essentia, cmake branch)")
+set(ONNXRUNTIME_INCLUDE_DIR "" CACHE PATH "Path to the ONNX Runtime headers")
+set(ONNXRUNTIME_LIBRARY "" CACHE FILEPATH "Path to the ONNX Runtime library (onnxruntime.lib on Windows)")
 
 if(NOT EXISTS "${ESSENTIA_SOURCE_DIR}/CMakeLists.txt")
   message(FATAL_ERROR "ESSENTIA_SOURCE_DIR must point to the Essentia source tree")
 endif()
 
-# Only build the parts of Essentia needed by the tools
+# Only build the parts of Essentia needed by the tools. The MusicNN models run
+# on ONNX Runtime, Essentia only computes their input (TensorflowInputMusiCNN,
+# which doesn't need TensorFlow despite its name)
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
 set(BUILD_VAMP_PLUGIN OFF CACHE BOOL "" FORCE)
-set(USE_TENSORFLOW ON CACHE BOOL "" FORCE)
+set(USE_TENSORFLOW OFF CACHE BOOL "" FORCE)
+set(USE_ML_PREPROCESSING ON CACHE BOOL "" FORCE)
 set(USE_GAIA2 OFF CACHE BOOL "" FORCE)
 set(DEBUGGING_ENABLED OFF CACHE BOOL "" FORCE)
 set(STRIP_DOCUMENTATION ON CACHE BOOL "" FORCE)
@@ -28,6 +33,7 @@ set(CMAKE_DISABLE_FIND_PACKAGE_Taglib ON)
 set(CMAKE_DISABLE_FIND_PACKAGE_Chromaprint ON)
 set(CMAKE_DISABLE_FIND_PACKAGE_VampSdk ON)
 set(CMAKE_DISABLE_FIND_PACKAGE_Gaia2 ON)
+set(CMAKE_DISABLE_FIND_PACKAGE_TensorFlow ON)
 
 add_subdirectory("${ESSENTIA_SOURCE_DIR}" essentia EXCLUDE_FROM_ALL)
 
@@ -43,13 +49,18 @@ endif()
 # which would only show up as errors at runtime. The find_library() results
 # are cache variables, so they are visible here
 foreach(library AVCODEC_LIBRARIES AVFORMAT_LIBRARIES AVUTIL_LIBRARIES SWRESAMPLE_LIBRARIES
-                FFTW3f_LIBRARY yaml_LIBRARY SampleRate_LIBRARY TensorFlow_LIBRARY)
+                FFTW3f_LIBRARY yaml_LIBRARY SampleRate_LIBRARY ONNXRUNTIME_LIBRARY ONNXRUNTIME_INCLUDE_DIR)
   if(NOT ${library})
     message(FATAL_ERROR "Required dependency not found: ${library}")
   endif()
 endforeach()
 
-# Look for the TensorFlow library next to the binaries
+add_library(onnxruntime UNKNOWN IMPORTED)
+set_target_properties(onnxruntime PROPERTIES
+  IMPORTED_LOCATION "${ONNXRUNTIME_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_INCLUDE_DIR}")
+
+# Look for the ONNX Runtime library next to the binaries
 if(APPLE)
   set(CMAKE_INSTALL_RPATH "@loader_path")
 elseif(UNIX)
@@ -78,5 +89,7 @@ foreach(tool ${ABNG_TOOLS})
     target_sources(${tool} PRIVATE utf8.manifest)
   endif()
 endforeach()
+
+target_link_libraries(abng_musicnn PRIVATE onnxruntime)
 
 install(TARGETS ${ABNG_TOOLS} RUNTIME DESTINATION . COMPONENT tools)

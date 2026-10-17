@@ -21,8 +21,10 @@ from .constants import (
 )
 from .settings import exe
 
-# Written next to the installed tools, so the plugin knows which release they are
+# Written next to the installed tools, so the plugin knows which release and
+# variant they are
 RELEASE_FILE = "TOOLS_RELEASE"
+VARIANT_FILE = "TOOLS_VARIANT"
 
 CHUNK_SIZE = 1 << 20
 
@@ -37,15 +39,17 @@ class InstallError(Exception):
     pass
 
 
-def archive_platform(platform: str) -> Optional[str]:
-    """The platform of the prebuilt tools that run on this platform, if any"""
+def archive_platform(platform: str, variant: str = "cpu") -> Optional[str]:
+    """The platform of the prebuilt tools of the variant that run on this
+    platform, if any"""
     platform = TOOLS_PLATFORM_ALIASES.get(platform, platform)
-    return platform if platform in TOOLS_CHECKSUMS else None
+    return platform if platform in TOOLS_CHECKSUMS.get(variant, {}) else None
 
 
-def archive_name(platform: str) -> str:
+def archive_name(platform: str, variant: str = "cpu", release: int = TOOLS_RELEASE) -> str:
     extension = "zip" if platform.startswith("windows-") else "tar.xz"
-    return f"abng-tools-{TOOLS_RELEASE}-{platform}.{extension}"
+    suffix = "" if variant == "cpu" else f"-{variant}"
+    return f"abng-tools-{release}-{platform}{suffix}.{extension}"
 
 
 def installed_release(directory: str) -> Optional[int]:
@@ -54,6 +58,17 @@ def installed_release(directory: str) -> Optional[int]:
             return int(f.read().strip())
     except (OSError, ValueError):
         return None
+
+
+def installed_variant(directory: str) -> str:
+    """The variant of the prebuilt tools in directory, releases before tools-3
+    only had "cpu" tools"""
+    try:
+        with open(os.path.join(directory, VARIANT_FILE), encoding="utf-8") as f:
+            variant = f.read().strip()
+    except OSError:
+        return "cpu"
+    return variant if variant in TOOLS_CHECKSUMS else "cpu"
 
 
 def proxy_url(setting) -> Optional[str]:
@@ -80,8 +95,9 @@ class ToolsInstaller:
     def __init__(self, platform: str, destination: str, proxy: Optional[str] = None,
                  progress: Optional[Callable[[str, int, int], None]] = None,
                  cancelled: Optional[threading.Event] = None, url: str = TOOLS_URL,
-                 checksums: Dict[str, str] = TOOLS_CHECKSUMS):
+                 checksums: Dict[str, Dict[str, str]] = TOOLS_CHECKSUMS, variant: str = "cpu"):
         self.platform = platform
+        self.variant = variant
         self.destination = destination
         self.proxy = proxy
         self.progress = progress or (lambda stage, done, total: None)
@@ -94,10 +110,11 @@ class ToolsInstaller:
             raise InstallCancelled()
 
     def install(self) -> None:
-        if self.platform not in self.checksums:
-            raise InstallError(f"There are no prebuilt tools for {self.platform}")
+        checksums = self.checksums.get(self.variant, {})
+        if self.platform not in checksums:
+            raise InstallError(f"There are no prebuilt {self.variant.upper()} tools for {self.platform}")
 
-        name = archive_name(self.platform)
+        name = archive_name(self.platform, self.variant)
         parent = os.path.dirname(self.destination)
         os.makedirs(parent, exist_ok=True)
         # Left behind when Picard quit during an installation
@@ -108,7 +125,7 @@ class ToolsInstaller:
         work = tempfile.mkdtemp(prefix=WORK_PREFIX, dir=parent)
         try:
             archive = os.path.join(work, name)
-            self._download(self.url.format(release=TOOLS_RELEASE, name=name), archive, self.checksums[self.platform])
+            self._download(self.url.format(release=TOOLS_RELEASE, name=name), archive, checksums[self.platform])
 
             self.progress("extract", 0, 0)
             staging = os.path.join(work, "staging")
@@ -122,6 +139,8 @@ class ToolsInstaller:
             self._check_tools(tools)
             with open(os.path.join(tools, RELEASE_FILE), "w", encoding="utf-8") as f:
                 f.write(f"{TOOLS_RELEASE}\n")
+            with open(os.path.join(tools, VARIANT_FILE), "w", encoding="utf-8") as f:
+                f.write(f"{self.variant}\n")
 
             self._check_cancelled()
             if os.path.exists(self.destination):
@@ -170,7 +189,7 @@ class ToolsInstaller:
                 for member in members:
                     path = self._member_path(member.name)
                     if member.issym() or member.islnk():
-                        # TensorFlow's versioned library names are symlinks to each other
+                        # ONNX Runtime's versioned library names are symlinks to each other
                         target = posixpath.normpath(posixpath.join(posixpath.dirname(path), member.linkname)) if member.issym() else posixpath.normpath(member.linkname)
                         self._member_path(target)
                     elif not (member.isfile() or member.isdir()):

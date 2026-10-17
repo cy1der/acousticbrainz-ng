@@ -1,7 +1,7 @@
 import os
 import shutil
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from picard.plugin3.api import PluginApi
 from PyQt6 import QtCore
@@ -38,6 +38,11 @@ class TrackResult:
     cancelled: bool = False
 
 
+class PluginSignals(QtCore.QObject):
+    # Emitted with whether any analysis can be stopped
+    analysis_running = QtCore.pyqtSignal(bool)
+
+
 class AcousticBrainzNG:
     def __init__(self, api: PluginApi):
         self.api = api
@@ -45,6 +50,10 @@ class AcousticBrainzNG:
         self.pool = QtCore.QThreadPool()
         # Files queued or being analyzed, only accessed on the main thread
         self.in_flight: set = set()
+        # Analysis batches with tracks left to analyze, only accessed on the
+        # main thread
+        self.batches: set = set()
+        self.signals = PluginSignals()
         self.runner = ProcessRunner(api.logger)
         self.audio = AudioTools(self.runner)
         self.essentia = Essentia(self.runner)
@@ -53,15 +62,27 @@ class AcousticBrainzNG:
     def settings(self) -> Settings:
         return read_settings(self.api)
 
+    def is_analyzing(self) -> bool:
+        """Whether any analysis can still be stopped"""
+        return any(not batch.stopped for batch in self.batches)
+
+    def update_analysis_running(self) -> None:
+        self.signals.analysis_running.emit(self.is_analyzing())
+
     def shutdown(self) -> None:
         self.runner.cancel()
         self.pool.clear()
         self.pool.waitForDone()
 
-    def analyze_track(self, settings: Settings, jobs: List[FileJob], album: Optional[AlbumJob]) -> TrackResult:
+    def analyze_track(self, settings: Settings, jobs: List[FileJob], album: Optional[AlbumJob], should_continue: Callable[[], bool]) -> TrackResult:
+        """Analyzes the files in order. should_continue is called before each
+        file, once it returns False the remaining files are left out of the
+        result"""
         results = TrackResult([])
         try:
             for job in jobs:
+                if not should_continue():
+                    break
                 result = FileResult(job.file)
                 results.files.append(result)
                 try:

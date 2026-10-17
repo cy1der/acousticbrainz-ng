@@ -1,8 +1,10 @@
 # Model license
 
-The models in this directory (`.pb` files and their `.json` metadata) were created by the [Music Technology Group (MTG)](https://www.upf.edu/web/mtg) of Universitat Pompeu Fabra, Barcelona, and are distributed unmodified from [Essentia's models page](https://essentia.upf.edu/models.html).
+The models in this directory (`.onnx` files and their `.json` metadata) were created by the [Music Technology Group (MTG)](https://www.upf.edu/web/mtg) of Universitat Pompeu Fabra, Barcelona, and are distributed on [Essentia's models page](https://essentia.upf.edu/models.html).
 
-They are licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode). They may not be used for commercial purposes. The MTG offers a proprietary license for commercial use on request, see Essentia's models page.
+**Changes:** the `.json` metadata is unmodified. The `.onnx` files are the original TensorFlow graphs (`.pb`, see the table below) converted to the ONNX format with [tf2onnx](https://github.com/onnx/tensorflow-onnx) by [`scripts/convert-models.py`](../scripts/convert-models.py), which checks that the converted models give the same predictions. The weights and the architecture are unchanged.
+
+The models, including the converted ones, are licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode). They may not be used for commercial purposes. The MTG offers a proprietary license for commercial use on request, see Essentia's models page.
 
 The models are provided "as is", without warranty of any kind, see section 5 of the license.
 
