@@ -37,9 +37,9 @@ What has been tested with the current analysis tools (`tools-3`). ✅ works, ❌
 
 | OS | Arch | Backend | GPU | Status | Notes |
 |---------|-----------------------|--------|---------------------------|----|-------|
-| Linux   | x86_64                | CPU    | —                         | ✅ | Ryzen 7 7840HS, Gentoo. Tools only, not yet in Picard (2026-10) |
-| Linux   | x86_64                | WebGPU | NVIDIA                    | ✅ | RTX 4060 Laptop, driver 615. Tools only, not yet in Picard (2026-10) |
-| Linux   | x86_64                | WebGPU | AMD                       | ✅ | Radeon 780M (integrated, RADV). Tools only, not yet in Picard (2026-10) |
+| Linux   | x86_64                | CPU    | —                         | ✅ | Ryzen 7 7840HS on Gentoo Linux |
+| Linux   | x86_64                | WebGPU | NVIDIA                    | ✅ | RTX 4060 Laptop using 615.78.08 on Gentoo Linux |
+| Linux   | x86_64                | WebGPU | AMD                       | ✅ | Integrated Radeon 780M on Gentoo Linux |
 | Linux   | x86_64                | WebGPU | Intel                     | ❔ | |
 | Linux   | ARM64                 | CPU    | —                         | ❔ | |
 | Linux   | ARM64                 | WebGPU | any                       | ❔ | |
@@ -47,9 +47,9 @@ What has been tested with the current analysis tools (`tools-3`). ✅ works, ❌
 | macOS   | ARM64 (Apple Silicon) | CoreML | Apple                     | ❔ | |
 | macOS   | x86_64 (Intel)        | CPU    | —                         | ❔ | |
 | macOS   | x86_64 (Intel)        | CoreML | AMD, Intel                | ❔ | |
-| Windows | x86_64                | CPU    | —                         | ❔ | The previous tools (`tools-2`) worked on Windows 11 |
-| Windows | x86_64                | WebGPU | NVIDIA                    | ❔ | |
-| Windows | x86_64                | WebGPU | AMD                       | ❔ | |
+| Windows | x86_64                | CPU    | —                         | ✅ | Ryzen 7 7840HS on Windows 11 |
+| Windows | x86_64                | WebGPU | NVIDIA                    | ✅ | RTX 4060 Laptop using 610.88 on Windows 11 |
+| Windows | x86_64                | WebGPU | AMD                       | ✅ | Integrated Radeon 780M on Windows 11 |
 | Windows | x86_64                | WebGPU | Intel                     | ❔ | |
 | Windows | ARM64 (x64 emulation) | CPU    | —                         | ❔ | |
 | Windows | ARM64 (x64 emulation) | WebGPU | Qualcomm                  | ❔ | |
