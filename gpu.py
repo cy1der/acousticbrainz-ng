@@ -1,12 +1,12 @@
-import ctypes.util
-import glob
+# Only modules that Picard itself uses: its Windows and macOS builds only
+# include those of the standard library, e.g. no wave, glob or ctypes.util
 import json
 import os
 import platform
+import struct
 import subprocess
 import sys
 import tempfile
-import wave
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -23,6 +23,10 @@ VENDORS = {
 
 # Database of PCI device names, used for the GPU names on Linux
 PCI_IDS = ("/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids", "/usr/share/pci.ids")
+
+# Where Linux distributions install the Vulkan loader
+LIBRARY_DIRECTORIES = ("/usr/lib64", "/usr/lib", "/lib64", "/lib", "/usr/local/lib",
+                       "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu")
 
 
 @dataclass
@@ -79,12 +83,23 @@ def pci_name(vendor_id: str, device_id: str) -> str:
     return f"{vendor} GPU"
 
 
+def _has_vulkan() -> bool:
+    try:
+        import ctypes.util
+        return ctypes.util.find_library("vulkan") is not None
+    except ImportError:
+        return any(os.path.exists(os.path.join(directory, "libvulkan.so.1")) for directory in LIBRARY_DIRECTORIES)
+
+
 def _linux_gpus() -> GpuInfo:
     info = GpuInfo()
-    for device in sorted(glob.glob("/sys/class/drm/card[0-9]*/device")):
-        # cardN-<connector> entries are the outputs of a card
-        if "-" in os.path.basename(os.path.dirname(device)):
-            continue
+    try:
+        cards = os.listdir("/sys/class/drm")
+    except OSError:
+        cards = []
+    # cardN-<connector> entries are the outputs of a card
+    for card in sorted(card for card in cards if card.startswith("card") and card[4:].isdigit()):
+        device = os.path.join("/sys/class/drm", card, "device")
         try:
             with open(os.path.join(device, "vendor")) as f:
                 vendor_id = f.read().strip().lower().removeprefix("0x")
@@ -94,7 +109,7 @@ def _linux_gpus() -> GpuInfo:
             continue
         if vendor_id in VENDORS:
             info.names.append(pci_name(vendor_id, device_id))
-    if info.names and not ctypes.util.find_library("vulkan"):
+    if info.names and not _has_vulkan():
         info.problem = "Vulkan isn't installed (libvulkan.so.1, e.g. the vulkan-loader or libvulkan1 package)"
     return info
 
@@ -158,12 +173,14 @@ class ToolsGpu:
     problem: Optional[str] = None
 
 
-def _write_silence(path: str, seconds: int = 5) -> None:
-    with wave.open(path, "wb") as output:
-        output.setnchannels(1)
-        output.setsampwidth(2)
-        output.setframerate(16000)
-        output.writeframes(b"\x00\x00" * 16000 * seconds)
+def _write_silence(path: str, seconds: int = 5, rate: int = 16000) -> None:
+    """Writes a 16 bit mono WAV file of silence"""
+    data = b"\x00\x00" * rate * seconds
+    header = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+              + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+              + b"data" + struct.pack("<I", len(data)))
+    with open(path, "wb") as output:
+        output.write(header + data)
 
 
 def check_tools_gpu(binaries_path: str, model_path: str) -> ToolsGpu:
