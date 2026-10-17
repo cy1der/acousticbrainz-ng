@@ -29,6 +29,7 @@ class Settings:
     calculate_replaygain: bool
     save_fingerprint: bool
     auto_apply_cached: bool
+    use_gpu: bool
 
 
 def exe(name: str) -> str:
@@ -91,4 +92,5 @@ def read_settings(api: PluginApi) -> Settings:
         calculate_replaygain=cfg["calculate_replaygain"],
         save_fingerprint=cfg["analyze_optional"] and cfg["save_fingerprint"],
         auto_apply_cached=cfg["auto_apply_cached"],
+        use_gpu=cfg["use_gpu"],
     )

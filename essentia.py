@@ -10,12 +10,14 @@ from .audio import ProcessingFile
 from .constants import (
     BUILD_INSTRUCTIONS,
     FINGERPRINT_VALUES,
-    MUSICNN_BATCH_SIZE,
+    MUSICNN_CPU_BATCH_SIZE,
+    MUSICNN_GPU_BATCH_SIZE,
     OPTIONAL_MODELS,
     REQUIRED_BINARIES,
     REQUIRED_MODELS,
 )
 from .fingerprint import fingerprint_png
+from .gpu import tools_support_gpu
 from .process import AnalysisCancelled, ProcessRunner
 from .settings import Settings, exe
 
@@ -29,6 +31,8 @@ class Essentia:
     def __init__(self, runner: ProcessRunner):
         self.runner = runner
         self.log = runner.log
+        self._gpu_warned = False
+        self._gpu_warning_lock = threading.Lock()
 
     @staticmethod
     def binary_path(settings: Settings, binary_name: str) -> str:
@@ -49,7 +53,7 @@ class Essentia:
         if not path or not os.path.exists(path):
             return False
 
-        return all(os.path.exists(os.path.join(path, f"{model[0]}.pb")) for model in models)
+        return all(os.path.exists(os.path.join(path, f"{model[0]}.onnx")) for model in models)
 
     @staticmethod
     def pending_models(models: List[Tuple[str, str]], output_path: str) -> List[Tuple[str, str]]:
@@ -73,43 +77,60 @@ class Essentia:
 
         musicnn_binary_path = self.binary_path(settings, "abng_musicnn")
 
-        success_results = {}
-        def run_musicnn_model(model_info):
-            model_name, output_file = model_info
+        # (model name, model path, output path) of the models without results
+        pending = []
+        for model_name, output_file in models:
+            model_path = os.path.join(models_path, f"{model_name}.onnx")
+            if not os.path.exists(model_path):
+                self.log.error(f"Model {model_name} not found at {model_path}")
+                return False
+            output_file_path = os.path.join(output_path, f"{output_file}.json")
+            if not os.path.exists(output_file_path):
+                pending.append((model_name, model_path, output_file_path))
+        if not pending:
+            return True
+
+        # Each process decodes the audio once and runs its models one after
+        # the other. On the GPU one process runs them all, on the CPU they are
+        # split across processes that share the CPU cores
+        gpu = settings.use_gpu and tools_support_gpu(settings.binaries_path)
+        processes = 1 if gpu else min(settings.max_musicnn_workers, len(pending))
+        threads = max(1, (os.cpu_count() or 1) // (processes * settings.max_concurrent_analyses))
+        batch_size = MUSICNN_GPU_BATCH_SIZE if gpu else MUSICNN_CPU_BATCH_SIZE
+        groups = [pending[i::processes] for i in range(processes)]
+
+        def run_group(group: List[Tuple[str, str, str]]) -> None:
+            arguments = [musicnn_binary_path, "--device", "gpu" if gpu else "cpu", "--batch-size", str(batch_size), "--threads", str(threads), file]
+            for _model_name, model_path, output_file_path in group:
+                arguments += [model_path, output_file_path]
             try:
-                model_path = os.path.join(models_path, f"{model_name}.pb")
-
-                if not os.path.exists(model_path):
-                    raise FileNotFoundError(f"Model {model_name} not found at {model_path}")
-
-                output_file_path = os.path.join(output_path, f"{output_file}.json")
-
-                if os.path.exists(output_file_path):
-                    success_results[model_name] = True
-                    return
-
-                result = self.runner.run([musicnn_binary_path, model_path, file, output_file_path, "--batch-size", str(MUSICNN_BATCH_SIZE)])
-
-                if result.returncode != 0:
-                    success_results[model_name] = False
-                    self.runner.log_failure(f"MusicNN binary {musicnn_binary_path} failed for model {model_name} on file {file}", result)
-                else:
-                    success_results[model_name] = True
+                result = self.runner.run(arguments)
             except AnalysisCancelled:
-                success_results[model_name] = False
-            except FileNotFoundError as e:
-                success_results[model_name] = False
-                self.log.error(f"Model {model_name} not found: {e}")
+                return
             except Exception as e:
-                success_results[model_name] = False
-                self.log.error(f"Error processing model {model_name}: {e}")
+                self.log.error(f"Error running MusicNN binary {musicnn_binary_path}: {e}")
+                return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=settings.max_musicnn_workers) as executor:
-            futures = [executor.submit(run_musicnn_model, model) for model in models]
-            concurrent.futures.wait(futures)
+            if result.returncode != 0:
+                names = ", ".join(model_name for model_name, _model_path, _output in group)
+                self.runner.log_failure(f"MusicNN binary {musicnn_binary_path} failed for models {names} on file {file}", result)
+            elif gpu and "GPU unavailable" in result.stderr:
+                self._gpu_fallback(result.stderr)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=processes) as executor:
+            list(executor.map(run_group, groups))
         self.runner.check_cancelled()
 
-        return all(success_results.get(model[0], False) for model in models)
+        return all(os.path.exists(output_file_path) for _model_name, _model_path, output_file_path in pending)
+
+    def _gpu_fallback(self, stderr: str) -> None:
+        # Only logged once, it would be the same for every file
+        with self._gpu_warning_lock:
+            if self._gpu_warned:
+                return
+            self._gpu_warned = True
+        reason = next((line for line in stderr.splitlines() if "GPU unavailable" in line), stderr.strip())
+        self.log.warning(f"Running MusicNN on the CPU instead of the GPU: {reason}")
 
     def analyze_required(self, settings: Settings, source: ProcessingFile, output_path: str) -> bool:
         if not self.check_binaries(settings):

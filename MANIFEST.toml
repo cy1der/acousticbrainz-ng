@@ -9,13 +9,13 @@ This is not a 1:1 recreation of the AcousticBrainz schema, but will provide most
 
 External dependencies:
 
-- Analysis tools built on Essentia and TensorFlow, which need to be built with the included scripts (see the homepage)
+- Analysis tools built on Essentia and ONNX Runtime, installed from the plugin options (see the homepage)
 - A few MusicNN models (included)
-- [FFmpeg](https://ffmpeg.org)
+- [FFmpeg](https://ffmpeg.org) (included with the analysis tools)
 
-**This plugin is CPU heavy!**
+**This plugin is CPU heavy!** It can run the MusicNN models on the GPU instead.
 """
-version = "3.2.1"
+version = "3.3.0"
 api = ["3.0"]
 authors = ["cy1der"]
 maintainers = ["cy1der"]

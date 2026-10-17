@@ -16,6 +16,7 @@ from .constants import (
     REQUIRED_MODELS,
     TOOLS_RELEASE,
 )
+from .gpu import GpuInfo, check_tools_gpu, detect_gpus, needs_gpu_tools, tools_support_gpu
 from .installer import (
     InstallCancelled,
     InstallError,
@@ -23,6 +24,7 @@ from .installer import (
     archive_name,
     archive_platform,
     installed_release,
+    installed_variant,
     proxy_url,
 )
 from .settings import default_path, exe, platform_name, resolve_path
@@ -38,6 +40,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        # Found in the background, None until then
+        self.gpus = None
         self.setup_ui()
 
     def _create_path_input_layout(self, line_edit: QtWidgets.QLineEdit, browse_callback, check_callback=None) -> QtWidgets.QHBoxLayout:
@@ -89,6 +93,13 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         self.analyze_optional_checkbox.toggled.connect(self._update_fingerprint_state)
 
+        self.use_gpu_checkbox = QtWidgets.QCheckBox("Use the GPU for MusicNN", self)
+        self.use_gpu_checkbox.setToolTip("Run the MusicNN models on the GPU, falls back to the CPU when the GPU can't be used")
+        self.use_gpu_checkbox.setEnabled(False)
+        self.gpu_status_label = QtWidgets.QLabel("Looking for a GPU...", self)
+        self.gpu_status_label.setWordWrap(True)
+        self.gpu_status_label.setIndent(20)
+
         musicnn_workers_layout = QtWidgets.QHBoxLayout()
         concurrent_analyses_layout = QtWidgets.QHBoxLayout()
         rg_reference_layout = QtWidgets.QHBoxLayout()
@@ -133,6 +144,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         options_layout.addWidget(self.save_fingerprint_checkbox)
         options_layout.addWidget(self.calculate_replaygain_checkbox)
         options_layout.addWidget(self.auto_apply_cached_checkbox)
+        options_layout.addWidget(self.use_gpu_checkbox)
+        options_layout.addWidget(self.gpu_status_label)
         options_layout.addLayout(concurrent_analyses_layout)
         options_layout.addLayout(musicnn_workers_layout)
 
@@ -149,13 +162,16 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         def update_concurrent_processes():
             concurrent_analyses = self.concurrent_analyses_input.value()
-            musicnn_workers = self.musicnn_workers_input.value()
+            # One process runs all models on the GPU
+            musicnn_workers = 1 if self.use_gpu_checkbox.isChecked() else self.musicnn_workers_input.value()
             max_processes = (2 * concurrent_analyses) + (concurrent_analyses * musicnn_workers)
             breakdown = f"[(2 x {concurrent_analyses}) feature processes + ({concurrent_analyses} x {musicnn_workers}) MusicNN processes]"
             self.concurrent_processes_display.setText(f"{breakdown} = <span style='font-weight: bold;'>{max_processes}</span>")
 
         self.concurrent_analyses_input.valueChanged.connect(update_concurrent_processes)
         self.musicnn_workers_input.valueChanged.connect(update_concurrent_processes)
+        self.use_gpu_checkbox.toggled.connect(update_concurrent_processes)
+        self.use_gpu_checkbox.toggled.connect(lambda _checked: self._update_tools_status())
 
         options_layout.addLayout(rg_reference_layout)
 
@@ -221,21 +237,34 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         layout.addStretch()
 
+    def _wanted_variant(self) -> str:
+        """The variant of the prebuilt tools to install"""
+        if self.use_gpu_checkbox.isChecked() and needs_gpu_tools() and archive_platform(platform_name(), "gpu"):
+            return "gpu"
+        return "cpu"
+
     def _update_tools_status(self) -> None:
         platform = platform_name()
         directory = default_path(self.api, "binaries_path")
         release = installed_release(directory)
+        wanted = self._wanted_variant()
 
-        if release == TOOLS_RELEASE:
-            status, button = f"Prebuilt tools-{release} installed", "Reinstall tools"
-        elif release is not None:
-            status, button = f"Prebuilt tools-{release} installed, this version of the plugin needs tools-{TOOLS_RELEASE}", "Update tools"
+        if release is not None:
+            variant = installed_variant(directory)
+            # On macOS all tools can use the GPU
+            installed = f"Prebuilt tools-{release} ({variant.upper()}) installed" if needs_gpu_tools() else f"Prebuilt tools-{release} installed"
+            if release != TOOLS_RELEASE:
+                status, button = f"{installed}, this version of the plugin needs tools-{TOOLS_RELEASE}", "Update tools"
+            elif wanted == "gpu" and variant != "gpu":
+                status, button = f"{installed}, the GPU needs the GPU tools", "Install GPU tools"
+            else:
+                status, button = installed, "Reinstall tools"
         elif all(os.path.exists(os.path.join(directory, exe(binary))) for binary in REQUIRED_BINARIES):
             status, button = "Locally built tools installed", "Install prebuilt tools"
         else:
-            status, button = "Analysis tools not installed", "Install tools"
+            status, button = "Analysis tools not installed", "Install GPU tools" if wanted == "gpu" else "Install tools"
 
-        available = archive_platform(platform) is not None
+        available = archive_platform(platform, wanted) is not None
         if not available:
             status += f". There are no prebuilt tools for {platform}, see the README to build them"
 
@@ -252,7 +281,8 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             QtWidgets.QMessageBox.warning(self, "Install tools", "Wait for the running analyses to finish first.")
             return
 
-        platform = archive_platform(platform_name())
+        variant = self._wanted_variant()
+        platform = archive_platform(platform_name(), variant)
         if platform is None:
             return
 
@@ -262,7 +292,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             QtWidgets.QMessageBox.warning(self, "Install tools", str(e))
             return
 
-        name = archive_name(platform)
+        name = archive_name(platform, variant)
         destination = default_path(self.api, "binaries_path")
         cancelled = threading.Event()
 
@@ -281,7 +311,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         def progress(stage: str, done: int, total: int) -> None:
             thread.to_main(self._install_progress, dialog, name, stage, done, total)
 
-        installer = ToolsInstaller(platform, destination, proxy, progress, cancelled)
+        installer = ToolsInstaller(platform, destination, proxy, progress, cancelled, variant=variant)
 
         def run() -> None:
             error = None
@@ -337,6 +367,25 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         else:
             QtWidgets.QMessageBox.information(self, "Install tools", f"Installed the tools to {destination}.")
 
+    def _detect_gpus(self) -> None:
+        def run() -> None:
+            thread.to_main(self._gpus_detected, detect_gpus())
+
+        threading.Thread(target=run, name="abng-detect-gpus", daemon=True).start()
+
+    def _gpus_detected(self, gpus: GpuInfo) -> None:
+        if self.deleted:
+            return
+        self.gpus = gpus
+        if not gpus.names:
+            self.gpu_status_label.setText("No supported GPU found")
+        elif gpus.problem:
+            self.gpu_status_label.setText(f"Found {', '.join(gpus.names)}, but {gpus.problem}")
+        else:
+            self.gpu_status_label.setText(f"Found {', '.join(gpus.names)}")
+        # Kept enabled while checked, so that it can be turned off again
+        self.use_gpu_checkbox.setEnabled(gpus.usable or self.use_gpu_checkbox.isChecked())
+
     def _update_fingerprint_state(self, checked):
         if not checked:
             self.save_fingerprint_checkbox.setChecked(False)
@@ -386,8 +435,30 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
             return False
         else:
             if show_success:
-                QtWidgets.QMessageBox.information(self, "Binaries", "All binaries found!")
+                QtWidgets.QMessageBox.information(self, "Binaries", "All binaries found!\n\n" + self._gpu_support(binaries_path))
             return True
+
+    def _gpu_support(self, binaries_path: str) -> str:
+        """Describes whether the tools in binaries_path can use the GPU"""
+        if not tools_support_gpu(binaries_path):
+            return "These tools only use the CPU, install the GPU tools to use the GPU."
+        models_path = resolve_path(self.api, "models_path", self.models_path_input.text())
+        model = os.path.join(models_path, f"{REQUIRED_MODELS[0][0]}.onnx")
+        if not os.path.exists(model):
+            return "These tools can use the GPU, set the models path to test it."
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            check = check_tools_gpu(binaries_path, model)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        found = ""
+        if check.devices:
+            found = "\n\nGPUs found:\n" + "\n".join(f"• {device}" for device in check.devices)
+        if check.used:
+            return "These tools run MusicNN on the GPU." + found
+        self.api.logger.warning(f"The analysis tools can't use the GPU: {check.problem}")
+        return f"These tools can't use the GPU and use the CPU instead: {check.problem}" + found
 
     def _check_models(self, show_success=False, check_optional=True) -> bool:
         path = resolve_path(self.api, "models_path", self.models_path_input.text())
@@ -397,7 +468,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
 
         missing_required = []
         for model in REQUIRED_MODELS:
-            model_path = os.path.join(path, f"{model[0]}.pb")
+            model_path = os.path.join(path, f"{model[0]}.onnx")
             metadata_path = os.path.join(path, f"{model[0]}.json")
             if not os.path.exists(model_path) or not os.path.exists(metadata_path):
                 missing_required.append(model[0])
@@ -405,7 +476,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         missing_optional = []
         if check_optional:
             for model in OPTIONAL_MODELS:
-                model_path = os.path.join(path, f"{model[0]}.pb")
+                model_path = os.path.join(path, f"{model[0]}.onnx")
                 metadata_path = os.path.join(path, f"{model[0]}.json")
                 if not os.path.exists(model_path) or not os.path.exists(metadata_path):
                     missing_optional.append(model[0])
@@ -450,6 +521,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.save_raw_checkbox.setChecked(cfg["save_raw"])
         self.calculate_replaygain_checkbox.setChecked(cfg["calculate_replaygain"])
         self.auto_apply_cached_checkbox.setChecked(cfg["auto_apply_cached"])
+        self.use_gpu_checkbox.setChecked(cfg["use_gpu"])
         self.rg_reference_input.setEnabled(self.calculate_replaygain_checkbox.isChecked())
 
         optional_setting = cfg["analyze_optional"]
@@ -466,6 +538,10 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         self.cache_path_input.setText(cfg["cache_path"])
 
         self._update_tools_status()
+        if self.gpus is None:
+            self._detect_gpus()
+        else:
+            self._gpus_detected(self.gpus)
 
     def save(self):
         self._check_binaries()
@@ -478,6 +554,7 @@ class AcousticBrainzNGOptionsPage(OptionsPage):
         cfg["calculate_replaygain"] = self.calculate_replaygain_checkbox.isChecked()
         cfg["auto_apply_cached"] = self.auto_apply_cached_checkbox.isChecked()
         cfg["save_fingerprint"] = self.save_fingerprint_checkbox.isChecked()
+        cfg["use_gpu"] = self.use_gpu_checkbox.isChecked()
 
         cfg["max_musicnn_workers"] = self.musicnn_workers_input.value()
         cfg["max_concurrent_analyses"] = self.concurrent_analyses_input.value()

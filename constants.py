@@ -32,26 +32,31 @@ REQUIRED_BINARIES: List[str] = [
 ]
 
 # The release of the tools (GitHub release tools-<number>) this version of the
-# plugin needs, see "Analysis tools" in the README
-TOOLS_RELEASE = 2
+# plugin needs, see CONTRIBUTING.md
+TOOLS_RELEASE = 3
 
 TOOLS_URL = "https://github.com/cy1der/acousticbrainz-ng/releases/download/tools-{release}/{name}"
 
-# SHA-256 of the archives of TOOLS_RELEASE by platform, from the release's
-# SHA256SUMS. Pinned here so that a download is only trusted if it matches
-# what this version of the plugin expects
-TOOLS_CHECKSUMS: Dict[str, str] = {
-    "linux-x86_64": "33a6a060fdd17481ffd4d5a906e40b72694081b48d63fe361143cfbf569ddaea",
-    "linux-arm64": "d4c3b19880d4259480a32e9fae6ae50948efd944397cfe6c48a4d6caf9752e5a",
-    "macos-arm64": "8a7cf1208c6821f6cea846aa8517b479adcf498f2ab016726e44e06ec979c922",
-    "macos-x86_64": "0cbb02499508004563cf5d62b15b458c09aa433f60f221778596819ae70aadc3",
-    "windows-x86_64": "9cdce96d1589af532f8cc0e70cd40030b74753e4e35cbb0498a12f0621cc36a4",
+# The tools come in two variants: "cpu", and "gpu" which also includes the
+# WebGPU execution provider. On macOS the "cpu" tools already run the models
+# on the GPU with CoreML, there are no "gpu" tools
+TOOLS_VARIANTS = ("cpu", "gpu")
+
+# SHA-256 of the archives of TOOLS_RELEASE by variant and platform, from the
+# release's SHA256SUMS. Pinned here so that a download is only trusted if it
+# matches what this version of the plugin expects
+TOOLS_CHECKSUMS: Dict[str, Dict[str, str]] = {
+    "cpu": {},
+    "gpu": {},
 }
 
 # Platforms without their own build that can run another platform's tools
 TOOLS_PLATFORM_ALIASES: Dict[str, str] = {
     "windows-arm64": "windows-x86_64",
 }
+
+# Name of the WebGPU execution provider library in the "gpu" tools
+WEBGPU_LIBRARIES = ("libonnxruntime_providers_webgpu.so", "onnxruntime_providers_webgpu.dll")
 
 BUILD_INSTRUCTIONS = (
     "Install them with the \"Install tools\" button in the plugin options, or build them with "
@@ -60,9 +65,11 @@ BUILD_INSTRUCTIONS = (
 
 FFMPEG_MISSING = "FFmpeg not found, install the analysis tools in the plugin options, they include it, or set its path there"
 
-# Number of MusicNN patches per TensorFlow run. Doesn't change the results,
-# but the default of 64 needs about 4 times as much memory
-MUSICNN_BATCH_SIZE = 4
+# Number of MusicNN patches per model run. Doesn't change the results. On the
+# CPU larger batches are slower and need more memory, on the GPU 16 is the
+# fastest
+MUSICNN_CPU_BATCH_SIZE = 4
+MUSICNN_GPU_BATCH_SIZE = 16
 
 # Total number of MusicNN class probabilities across all models, i.e. the
 # number of values encoded into the fingerprint image
@@ -76,7 +83,6 @@ MAX_MUSICNN_WORKERS = max(len(REQUIRED_MODELS), len(OPTIONAL_MODELS))
 MAX_CONCURRENT_ANALYSES = 8
 
 ENV = os.environ.copy()
-ENV['TF_ENABLE_ONEDNN_OPTS'] = "0"
 
 # Plugin options as (name, default, bounds). Empty paths mean "use the
 # bundled/auto-detected location", resolved at runtime so that the plugin
@@ -94,6 +100,7 @@ PLUGIN_OPTIONS: List[Tuple[str, Union[str, int, bool], Union[Tuple[int, int], No
     ("calculate_replaygain", True, None),
     ("save_fingerprint", False, None),
     ("auto_apply_cached", True, None),
+    ("use_gpu", False, None),
 ]
 
 # Option names used by the Picard 2 version of this plugin, stored in the

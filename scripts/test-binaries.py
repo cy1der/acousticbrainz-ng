@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Checks that the analysis tools work by running them on a generated audio file.
 
-Usage: test-binaries.py [--require-ffmpeg] BINARIES_DIR [MODELS_DIR]
+Usage: test-binaries.py [--require-ffmpeg] [--gpu | --require-gpu] BINARIES_DIR [MODELS_DIR]
 
 BINARIES_DIR is the directory containing abng_key, abng_musicnn and
 abng_rhythm, e.g. bin/linux-x86_64. MODELS_DIR defaults to the repository's
 models directory. The ffmpeg and ffprobe programs in BINARIES_DIR are checked
-too if they are there, --require-ffmpeg fails when they aren't. Only needs the
-Python standard library.
+too if they are there, --require-ffmpeg fails when they aren't.
+
+The MusicNN predictions are compared to the ones of the TensorFlow based
+tools-2 release in reference-predictions.json. --gpu also runs the models with
+--device gpu, which falls back to the CPU without a usable GPU, --require-gpu
+fails when it does. Only needs the Python standard library.
 """
 
 import json
@@ -24,6 +28,11 @@ import zlib
 SAMPLE_RATE = 44100
 DURATION = 20
 BPM = 120
+
+# Largest accepted difference to the reference predictions. The converted
+# models differ by less than 1e-5, the rest allows for differences in decoding
+# and resampling between platforms
+TOLERANCE = 1e-3
 
 
 def cover_art_tag() -> bytes:
@@ -72,8 +81,7 @@ def write_test_audio(path: str, channels: int = 2) -> None:
 
 
 def run(arguments: list) -> subprocess.CompletedProcess:
-    env = dict(os.environ, TF_ENABLE_ONEDNN_OPTS="0")
-    result = subprocess.run(arguments, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+    result = subprocess.run(arguments, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr)
@@ -135,12 +143,52 @@ def yaml_value(path: str, key: str) -> str:
     return match.group(1)
 
 
+def test_musicnn(musicnn: str, models: str, audio: str, directory: str, device: str) -> bool:
+    """Runs all models in one call, returns whether they ran on the GPU"""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference-predictions.json"), encoding="utf-8") as f:
+        reference = json.load(f)["predictions"]
+
+    arguments = [musicnn, "--device", device, "--batch-size", "16" if device == "gpu" else "4", audio]
+    for name in sorted(reference):
+        arguments += [os.path.join(models, name + ".onnx"), os.path.join(directory, f"{name}-{device}.json")]
+    result = run(arguments)
+    used = "gpu" if "device: gpu" in result.stdout else "cpu"
+    for line in result.stderr.splitlines():
+        if "GPU unavailable" in line:
+            print(line)
+
+    worst = 0.0
+    for name, expected in reference.items():
+        with open(os.path.join(directory, f"{name}-{device}.json"), encoding="utf-8") as f:
+            means = json.load(f)["predictions"]["mean"]
+        with open(os.path.join(models, name + ".json"), encoding="utf-8") as f:
+            classes = json.load(f)["classes"]
+        if len(means) != len(classes) or len(means) != len(expected):
+            raise SystemExit(f"Unexpected {name} predictions: {means}")
+        difference = max(abs(value - reference_value) for value, reference_value in zip(means, expected))
+        if difference > TOLERANCE:
+            raise SystemExit(f"The {name} predictions differ from the reference by {difference}: {means}, expected {expected}")
+        worst = max(worst, difference)
+
+    with open(os.path.join(directory, f"msd-musicnn-1-{device}.json"), encoding="utf-8") as f:
+        means = json.load(f)["predictions"]["mean"]
+    with open(os.path.join(models, "msd-musicnn-1.json"), encoding="utf-8") as f:
+        classes = json.load(f)["classes"]
+    top = sorted(zip(means, classes), reverse=True)[:3]
+    print(f"abng_musicnn ({used.upper()}): {len(reference)} models match the reference "
+          f"(largest difference {worst:.1e}), " + ", ".join(f"{name} {value:.2f}" for value, name in top))
+    return used == "gpu"
+
+
 def main() -> None:
     arguments = sys.argv[1:]
-    require_ffmpeg = "--require-ffmpeg" in arguments
-    arguments = [argument for argument in arguments if argument != "--require-ffmpeg"]
-    if len(arguments) not in (1, 2):
+    flags = {argument for argument in arguments if argument.startswith("--")}
+    arguments = [argument for argument in arguments if not argument.startswith("--")]
+    if len(arguments) not in (1, 2) or flags - {"--require-ffmpeg", "--gpu", "--require-gpu"}:
         raise SystemExit(__doc__)
+    require_ffmpeg = "--require-ffmpeg" in flags
+    require_gpu = "--require-gpu" in flags
+    gpu = require_gpu or "--gpu" in flags
 
     binaries = arguments[0]
     repository = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -170,17 +218,10 @@ def main() -> None:
         run([os.path.join(binaries, "abng_key" + exe), audio, key])
         print(f"abng_key: {yaml_value(key, 'key')} {yaml_value(key, 'key_scale')}")
 
-        model = os.path.join(models, "msd-musicnn-1")
-        predictions = os.path.join(directory, "msd.json")
-        run([os.path.join(binaries, "abng_musicnn" + exe), model + ".pb", audio, predictions, "--batch-size", "4"])
-        with open(predictions, encoding="utf-8") as f:
-            means = json.load(f)["predictions"]["mean"]
-        with open(model + ".json", encoding="utf-8") as f:
-            classes = json.load(f)["classes"]
-        if len(means) != len(classes) or not all(0 <= value <= 1 for value in means):
-            raise SystemExit(f"Unexpected MusicNN predictions: {means}")
-        top = sorted(zip(means, classes), reverse=True)[:3]
-        print("abng_musicnn: " + ", ".join(f"{name} {value:.2f}" for value, name in top))
+        musicnn = os.path.join(binaries, "abng_musicnn" + exe)
+        test_musicnn(musicnn, models, audio, directory, "cpu")
+        if gpu and not test_musicnn(musicnn, models, audio, directory, "gpu") and require_gpu:
+            raise SystemExit("abng_musicnn didn't use the GPU")
 
         if os.path.exists(ffmpeg) and os.path.exists(ffprobe):
             test_ffmpeg(ffmpeg, ffprobe, audio, directory)

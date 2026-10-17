@@ -63,8 +63,9 @@ def main() -> None:
 
     # Named like installer.archive_name()
     pinned = {
-        f"abng-tools-{release}-{platform}.{'zip' if platform.startswith('windows-') else 'tar.xz'}": checksum
-        for platform, checksum in constants.TOOLS_CHECKSUMS.items()
+        f"abng-tools-{release}-{platform}{'' if variant == 'cpu' else '-' + variant}.{'zip' if platform.startswith('windows-') else 'tar.xz'}": checksum
+        for variant, checksums in constants.TOOLS_CHECKSUMS.items()
+        for platform, checksum in checksums.items()
     }
     for name in sorted(pinned.keys() | published.keys()):
         if name not in published:

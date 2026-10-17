@@ -4,12 +4,13 @@
 # together with audio-only ffmpeg and ffprobe programs, which the plugin uses
 # for ReplayGain, hashing and downmixing.
 #
-# All dependencies except TensorFlow are built from source as static
+# All dependencies except ONNX Runtime are built from source as static
 # libraries, so no distribution packages are needed and the binaries keep
-# working when the system's libraries are upgraded. The TensorFlow C library is
+# working when the system's libraries are upgraded. The ONNX Runtime library is
 # downloaded and placed next to the binaries.
 #
-# Requirements: a C/C++ compiler, cmake, make, tar, curl or wget.
+# Requirements: a C/C++ compiler, cmake, make, tar, curl or wget. --webgpu
+# also needs python3.
 # Optional: nasm (faster FFmpeg decoders on x86_64).
 #
 # On Windows, build-binaries.ps1 builds the tools. In an MSYS2 shell with the
@@ -30,13 +31,21 @@ SOURCES=(
   "ffmpeg|9.0.2|https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz|84960df915059e8754fef2cd7c9afeb614062b1b5458ec471eecee619ee04e98"
 )
 
-# platform|version|url|sha256. There is no official TensorFlow C library for
-# Linux on ARM, the library in the Python package provides the same C API
-TENSORFLOW=(
-  "linux-x86_64|2.18.1|https://storage.googleapis.com/tensorflow/versions/2.18.1/libtensorflow-cpu-linux-x86_64.tar.gz|b692795f3ad198c531b02aeb2bc8146568d24aaf6a5dbf5faa43907c4028fd73"
-  "macos-arm64|2.18.1|https://storage.googleapis.com/tensorflow/versions/2.18.1/libtensorflow-cpu-darwin-arm64.tar.gz|61258fbcc8ff57d2868fa56f20edc06443a29eb2169b9f04515a405d5f1432ec"
-  "macos-x86_64|2.16.2|https://storage.googleapis.com/tensorflow/versions/2.16.2/libtensorflow-cpu-darwin-x86_64.tar.gz|26b17967afbe99ef89c16f59b366d62b14c55c5c583af6e70aed8c3b3147ee9f"
-  "linux-arm64|2.18.1|https://files.pythonhosted.org/packages/6c/c2/35a3542a91f4ffd4cf01e72d7f0fb59596cd5f467ff64878b0caef8e0f31/tensorflow-2.18.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl|1ba52b9c06ab8102b31e50acfaf56899b923171e603c8942f2bfeb181d6bb59e"
+# platform|version|url|sha256. 1.23.2 is the last release for Intel Macs. The
+# macOS libraries include the CoreML execution provider
+ONNXRUNTIME=(
+  "linux-x86_64|1.31.0|https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-linux-x64-1.31.0.tgz|cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57"
+  "linux-arm64|1.31.0|https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-linux-aarch64-1.31.0.tgz|c5b8b3cca31f3d643a3b313b8f42e2d0f16a4fcefd02cda343d97bd5306afaab"
+  "macos-arm64|1.31.0|https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-osx-arm64-1.31.0.tgz|1031b36dd3bdaa8d976a6130d9cf2a05e9be320b93ae804f8427b91dc3432afc"
+  "macos-x86_64|1.23.2|https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz|d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6"
+)
+
+# The WebGPU execution provider (Vulkan), installed with --webgpu for the GPU
+# builds. platform|version|url|sha256 of the Python package, which contains the
+# plugin library
+WEBGPU_EP=(
+  "linux-x86_64|0.4.0|https://files.pythonhosted.org/packages/c1/96/2a18a45079250afcd825687aef2895de266d5abc1cff9f52d2dede7598f2/onnxruntime_ep_webgpu-0.4.0-py3-none-manylinux_2_28_x86_64.whl|5d8c961eda91a88961cad1fb7621f389f006b18497d6ea9ecf96f729f066cbfb"
+  "linux-arm64|0.4.0|https://files.pythonhosted.org/packages/4e/ca/00c70322c19913c81a6bb2239aca83781b97a818b55c2ec3d25cec72dc4c/onnxruntime_ep_webgpu-0.4.0-py3-none-manylinux_2_28_aarch64.whl|17f660db53b1a509c63e721ac6784a2daa1c4e91a968523ee9986505ee5b0a55"
 )
 
 # Audio formats supported by Picard
@@ -56,15 +65,16 @@ usage() {
 Usage: $0 [options]
 
 Builds abng_key, abng_musicnn and abng_rhythm and installs them together with
-the TensorFlow C library.
+the ONNX Runtime library.
 
 Options:
   --output DIR       Install directory (default: bin/<platform> in the repository)
   --work-dir DIR     Download and build directory (default: build/ in the repository)
-  --tensorflow DIR   Use an existing TensorFlow C library (a directory containing
-                     include/ and lib/) instead of downloading it. Required on
-                     platforms without official builds, e.g. Linux on ARM
-  --jobs N           Number of parallel build jobs (default: number of CPUs)
+  --onnxruntime DIR  Use an existing ONNX Runtime build (a directory containing
+                     include/ and lib/) instead of downloading it
+  --webgpu           Also install the WebGPU execution provider, which runs the
+                     MusicNN models on the GPU (Linux only, macOS uses CoreML)
+  --jobs N          Number of parallel build jobs (default: number of CPUs)
   --ffmpeg-only      Only build FFmpeg into the work directory, used to build
                      it for build-binaries.ps1 on Windows
   --clean            Remove the work directory before building
@@ -104,7 +114,8 @@ fi
 
 OUTPUT_DIR="$REPO_DIR/bin/$PLATFORM"
 WORK_DIR="$REPO_DIR/build"
-TENSORFLOW_DIR=""
+ONNXRUNTIME_DIR=""
+WEBGPU=0
 CLEAN=0
 FFMPEG_ONLY=0
 
@@ -112,7 +123,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --output) OUTPUT_DIR="$2"; shift 2 ;;
     --work-dir) WORK_DIR="$2"; shift 2 ;;
-    --tensorflow) TENSORFLOW_DIR="$2"; shift 2 ;;
+    --onnxruntime) ONNXRUNTIME_DIR="$2"; shift 2 ;;
+    --webgpu) WEBGPU=1; shift ;;
     --jobs) JOBS="$2"; shift 2 ;;
     --ffmpeg-only) FFMPEG_ONLY=1; shift ;;
     --clean) CLEAN=1; shift ;;
@@ -136,6 +148,10 @@ else
 fi
 command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "curl or wget is required"
 
+if [ "$WEBGPU" = 1 ] && [ "$OS" != linux ]; then
+  die "--webgpu is only supported on Linux, macOS uses CoreML"
+fi
+
 if [ "$CLEAN" = 1 ]; then
   rm -rf "$WORK_DIR"
 fi
@@ -152,8 +168,12 @@ export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 export CMAKE_BUILD_PARALLEL_LEVEL="$JOBS"
 
 if [ "$OS" = macos ]; then
-  # Keep in sync with the minimum version of the TensorFlow library
-  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+  # The minimum versions of the ONNX Runtime libraries
+  if [ "$ARCH" = arm64 ]; then
+    export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+  else
+    export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.4}"
+  fi
 fi
 
 sha256() {
@@ -341,11 +361,10 @@ build_ffmpeg() {
   done
 }
 
-# Lays out the C API part of the TensorFlow Python package like the C library:
-# libtensorflow_cc exports the C API and finds the libraries it depends on
-# next to itself
-extract_tensorflow_wheel() {
-  command -v python3 >/dev/null 2>&1 || die "python3 is required to extract TensorFlow on $PLATFORM"
+# Extracts the plugin library and its licenses from the WebGPU execution
+# provider's Python package
+extract_webgpu_wheel() {
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for --webgpu"
   python3 -I - "$1" "$2" <<'EOF'
 import os
 import shutil
@@ -353,32 +372,25 @@ import sys
 import zipfile
 
 wheel, destination = sys.argv[1], sys.argv[2]
-targets = {
-    "tensorflow/libtensorflow_cc.so.2": "lib",
-    "tensorflow/libtensorflow_framework.so.2": "lib",
-    "tensorflow/include/LICENSE": ".",
-    "tensorflow/THIRD_PARTY_NOTICES.txt": ".",
-}
-
 with zipfile.ZipFile(wheel) as archive:
     for info in archive.infolist():
-        name = info.filename
-        if info.is_dir() or ".." in name.split("/"):
-            continue
-        if name.startswith(("tensorflow/include/tensorflow/", "tensorflow/include/tsl/", "tensorflow/include/xla/")):
-            target = os.path.join(destination, "include", name[len("tensorflow/include/"):])
-        elif name.startswith("tensorflow.libs/"):
-            target = os.path.join(destination, "lib", os.path.basename(name))
-        elif name in targets:
-            target = os.path.join(destination, targets[name], os.path.basename(name))
-        else:
-            continue
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with archive.open(info) as source, open(target, "wb") as output:
-            shutil.copyfileobj(source, output)
-
-os.symlink("libtensorflow_cc.so.2", os.path.join(destination, "lib", "libtensorflow.so"))
+        name = os.path.basename(info.filename)
+        if not info.is_dir() and (name.startswith("libonnxruntime_providers_webgpu.") or name in ("LICENSE", "ThirdPartyNotices.txt")):
+            with archive.open(info) as source, open(os.path.join(destination, name), "wb") as output:
+                shutil.copyfileobj(source, output)
 EOF
+  [ -n "$(ls "$2"/libonnxruntime_providers_webgpu.* 2>/dev/null)" ] || die "No WebGPU execution provider in $1"
+}
+
+# lookup <table name>: prints the entry of this platform in the table, if any
+lookup() {
+  local -n table="$1"
+  local entry
+  for entry in "${table[@]}"; do
+    if [ "${entry%%|*}" = "$PLATFORM" ]; then
+      echo "$entry"
+    fi
+  done
 }
 
 if [ "$FFMPEG_ONLY" = 0 ]; then
@@ -395,42 +407,46 @@ if [ "$FFMPEG_ONLY" = 1 ]; then
   exit 0
 fi
 
-if [ -z "$TENSORFLOW_DIR" ]; then
-  tensorflow_entry=""
-  for entry in "${TENSORFLOW[@]}"; do
-    if [ "${entry%%|*}" = "$PLATFORM" ]; then
-      tensorflow_entry="$entry"
-    fi
-  done
-  [ -n "$tensorflow_entry" ] || die "There is no TensorFlow C library for $PLATFORM, pass one with --tensorflow"
+if [ -z "$ONNXRUNTIME_DIR" ]; then
+  onnxruntime_entry="$(lookup ONNXRUNTIME)"
+  [ -n "$onnxruntime_entry" ] || die "There is no ONNX Runtime library for $PLATFORM, pass one with --onnxruntime"
 
-  IFS='|' read -r _ tensorflow_version tensorflow_url tensorflow_checksum <<<"$tensorflow_entry"
-  TENSORFLOW_DIR="$WORK_DIR/tensorflow-$PLATFORM-$tensorflow_version"
-  if [ ! -d "$TENSORFLOW_DIR" ]; then
-    rm -rf "$TENSORFLOW_DIR.tmp"
-    mkdir -p "$TENSORFLOW_DIR.tmp"
-    case "$tensorflow_url" in
-      *.whl)
-        fetch "tensorflow-$PLATFORM-$tensorflow_version.whl" "$tensorflow_url" "$tensorflow_checksum"
-        extract_tensorflow_wheel "$DOWNLOAD_DIR/tensorflow-$PLATFORM-$tensorflow_version.whl" "$TENSORFLOW_DIR.tmp"
-        ;;
-      *)
-        fetch "libtensorflow-cpu-$PLATFORM-$tensorflow_version.tar.gz" "$tensorflow_url" "$tensorflow_checksum"
-        tar -xzf "$DOWNLOAD_DIR/libtensorflow-cpu-$PLATFORM-$tensorflow_version.tar.gz" -C "$TENSORFLOW_DIR.tmp"
-        ;;
-    esac
-    mv "$TENSORFLOW_DIR.tmp" "$TENSORFLOW_DIR"
+  IFS='|' read -r _ onnxruntime_version onnxruntime_url onnxruntime_checksum <<<"$onnxruntime_entry"
+  ONNXRUNTIME_DIR="$WORK_DIR/onnxruntime-$PLATFORM-$onnxruntime_version"
+  if [ ! -d "$ONNXRUNTIME_DIR" ]; then
+    fetch "onnxruntime-$PLATFORM-$onnxruntime_version.tgz" "$onnxruntime_url" "$onnxruntime_checksum"
+    rm -rf "$ONNXRUNTIME_DIR.tmp"
+    mkdir -p "$ONNXRUNTIME_DIR.tmp"
+    # The archives contain a single directory, named ./onnxruntime-<platform>-<version>
+    # in some of them, which --strip-components doesn't handle
+    tar -xzf "$DOWNLOAD_DIR/onnxruntime-$PLATFORM-$onnxruntime_version.tgz" -C "$ONNXRUNTIME_DIR.tmp"
+    mv "$ONNXRUNTIME_DIR.tmp"/onnxruntime-* "$ONNXRUNTIME_DIR"
+    rm -rf "$ONNXRUNTIME_DIR.tmp"
   fi
 fi
 
-TENSORFLOW_DIR="$(cd "$TENSORFLOW_DIR" && pwd)"
+ONNXRUNTIME_DIR="$(cd "$ONNXRUNTIME_DIR" && pwd)"
 if [ "$OS" = macos ]; then
-  TENSORFLOW_LIBRARY="$TENSORFLOW_DIR/lib/libtensorflow.dylib"
+  ONNXRUNTIME_LIBRARY="$ONNXRUNTIME_DIR/lib/libonnxruntime.dylib"
 else
-  TENSORFLOW_LIBRARY="$TENSORFLOW_DIR/lib/libtensorflow.so"
+  ONNXRUNTIME_LIBRARY="$ONNXRUNTIME_DIR/lib/libonnxruntime.so"
 fi
-[ -f "$TENSORFLOW_DIR/include/tensorflow/c/c_api.h" ] || die "No TensorFlow headers in $TENSORFLOW_DIR/include"
-[ -e "$TENSORFLOW_LIBRARY" ] || die "No TensorFlow library at $TENSORFLOW_LIBRARY"
+[ -f "$ONNXRUNTIME_DIR/include/onnxruntime_cxx_api.h" ] || die "No ONNX Runtime headers in $ONNXRUNTIME_DIR/include"
+[ -e "$ONNXRUNTIME_LIBRARY" ] || die "No ONNX Runtime library at $ONNXRUNTIME_LIBRARY"
+
+if [ "$WEBGPU" = 1 ]; then
+  webgpu_entry="$(lookup WEBGPU_EP)"
+  [ -n "$webgpu_entry" ] || die "There is no WebGPU execution provider for $PLATFORM"
+  IFS='|' read -r _ webgpu_version webgpu_url webgpu_checksum <<<"$webgpu_entry"
+  WEBGPU_DIR="$WORK_DIR/webgpu-$PLATFORM-$webgpu_version"
+  if [ ! -d "$WEBGPU_DIR" ]; then
+    fetch "onnxruntime-ep-webgpu-$PLATFORM-$webgpu_version.whl" "$webgpu_url" "$webgpu_checksum"
+    rm -rf "$WEBGPU_DIR.tmp"
+    mkdir -p "$WEBGPU_DIR.tmp"
+    extract_webgpu_wheel "$DOWNLOAD_DIR/onnxruntime-ep-webgpu-$PLATFORM-$webgpu_version.whl" "$WEBGPU_DIR.tmp"
+    mv "$WEBGPU_DIR.tmp" "$WEBGPU_DIR"
+  fi
+fi
 
 log "Building tools"
 EXTRACTORS_BUILD="$BUILD_DIR/extractors"
@@ -445,7 +461,7 @@ cmake -S "$REPO_DIR/extractors" -B "$EXTRACTORS_BUILD" \
   -DFFTW3f_INCLUDE_DIR="$PREFIX/include" -DFFTW3f_LIBRARY="$PREFIX/lib/libfftw3f.a" \
   -Dyaml_INCLUDE_DIR="$PREFIX/include" -Dyaml_LIBRARY="$PREFIX/lib/libyaml.a" \
   -DSampleRate_INCLUDE_DIR="$PREFIX/include" -DSampleRate_LIBRARY="$PREFIX/lib/libsamplerate.a" \
-  -DTensorFlow_INCLUDE_DIR="$TENSORFLOW_DIR/include" -DTensorFlow_LIBRARY="$TENSORFLOW_LIBRARY"
+  -DONNXRUNTIME_INCLUDE_DIR="$ONNXRUNTIME_DIR/include" -DONNXRUNTIME_LIBRARY="$ONNXRUNTIME_LIBRARY"
 cmake --build "$EXTRACTORS_BUILD"
 
 log "Installing to $OUTPUT_DIR"
@@ -456,17 +472,21 @@ for program in ffmpeg ffprobe; do
   cp "$PREFIX/bin/$program" "$OUTPUT_DIR/"
 done
 
-# Copy the TensorFlow libraries, keeping the versioned names the binaries link
-# to. The libraries are read-only, remove the ones of a previous build first
-for library in "$TENSORFLOW_DIR"/lib/*; do
-  rm -f "$OUTPUT_DIR/$(basename "$library")"
-done
+# Copy the ONNX Runtime library, keeping the versioned names the binaries link
+# to. Remove the libraries of a previous build first, including the TensorFlow
+# ones of builds before tools-3, and the WebGPU provider when building without it
+rm -f "$OUTPUT_DIR"/libtensorflow* "$OUTPUT_DIR"/libonnxruntime* "$OUTPUT_DIR/LICENSE.tensorflow"
 if [ "$OS" = macos ]; then
-  cp -P "$TENSORFLOW_DIR"/lib/*.dylib "$OUTPUT_DIR/"
+  # Only the name the binaries link to, e.g. @rpath/libonnxruntime.1.dylib. The
+  # other names are copies of the library in some releases
+  onnxruntime_name="$(basename "$(otool -D "$ONNXRUNTIME_LIBRARY" | tail -n 1)")"
+  cp -L "$ONNXRUNTIME_DIR/lib/$onnxruntime_name" "$OUTPUT_DIR/"
 else
-  cp -P "$TENSORFLOW_DIR"/lib/*.so* "$OUTPUT_DIR/"
+  cp -P "$ONNXRUNTIME_DIR"/lib/libonnxruntime.so* "$OUTPUT_DIR/"
 fi
-rm -f "$OUTPUT_DIR/LICENSE.tensorflow"
+if [ "$WEBGPU" = 1 ]; then
+  cp "$WEBGPU_DIR"/libonnxruntime_providers_webgpu.* "$OUTPUT_DIR/"
+fi
 
 # The licenses of everything included in the binaries, needed when
 # distributing them
@@ -475,7 +495,7 @@ rm -rf "$LICENSE_DIR"
 mkdir -p "$LICENSE_DIR"
 
 # copy_licenses <component> <files...>: missing files are skipped, a
-# user-supplied TensorFlow might not include them
+# user-supplied ONNX Runtime might not include them
 copy_licenses() {
   local component="$1" file
   shift
@@ -505,7 +525,10 @@ copy_licenses fftw "$(unpack fftw)/COPYING"
 copy_licenses yaml "$(unpack yaml)/License"
 copy_licenses libsamplerate "$(unpack libsamplerate)/COPYING"
 copy_licenses ffmpeg "$(unpack ffmpeg)/COPYING.LGPLv2.1" "$(unpack ffmpeg)/LICENSE.md"
-copy_licenses tensorflow "$TENSORFLOW_DIR/LICENSE" "$TENSORFLOW_DIR/THIRD_PARTY_TF_C_LICENSES" "$TENSORFLOW_DIR/THIRD_PARTY_NOTICES.txt"
+copy_licenses onnxruntime "$ONNXRUNTIME_DIR/LICENSE" "$ONNXRUNTIME_DIR/ThirdPartyNotices.txt"
+if [ "$WEBGPU" = 1 ]; then
+  copy_licenses onnxruntime-ep-webgpu "$WEBGPU_DIR/LICENSE" "$WEBGPU_DIR/ThirdPartyNotices.txt"
+fi
 
 {
   echo "abng_key, abng_musicnn and abng_rhythm are licensed under the AGPL-3.0-or-later,"
@@ -520,10 +543,13 @@ copy_licenses tensorflow "$TENSORFLOW_DIR/LICENSE" "$TENSORFLOW_DIR/THIRD_PARTY_
     IFS='|' read -r name version url _ <<<"$entry"
     echo "- $name $version ($(license_of "$name")): $url"
   done
-  if [ -n "${tensorflow_url:-}" ]; then
-    echo "- tensorflow $tensorflow_version (Apache-2.0): $tensorflow_url"
+  if [ -n "${onnxruntime_url:-}" ]; then
+    echo "- onnxruntime $onnxruntime_version (MIT): $onnxruntime_url"
   else
-    echo "- tensorflow (Apache-2.0): provided by the user from $TENSORFLOW_DIR"
+    echo "- onnxruntime (MIT): provided by the user from $ONNXRUNTIME_DIR"
+  fi
+  if [ "$WEBGPU" = 1 ]; then
+    echo "- onnxruntime-ep-webgpu $webgpu_version (MIT): $webgpu_url"
   fi
 } > "$LICENSE_DIR/README.txt"
 

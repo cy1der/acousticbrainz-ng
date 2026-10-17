@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <!--
   Makes UTF-8 the code page of the tools on Windows 10 1903 and newer, so that
-  file names with non-ASCII characters reach Essentia, FFmpeg and TensorFlow
+  file names with non-ASCII characters reach Essentia, FFmpeg and ONNX Runtime
   intact. They expect UTF-8, the default code page only covers some characters.
 -->
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">

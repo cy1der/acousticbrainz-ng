@@ -1,9 +1,12 @@
-# Builds the analysis tools (extractors/) for every supported platform.
+# Builds the analysis tools (extractors/) for every supported platform, and
+# the GPU tools, which also include the WebGPU execution provider, for Linux and
+# Windows. On macOS the tools use the GPU through CoreML.
 #
-# Pull requests that change the tools only build and test them.
+# Pull requests that change the tools only build and test them. The runners
+# have no GPU, the GPU tools are tested falling back to the CPU.
 # Running the workflow manually with a release number also publishes them as
-# the GitHub release tools-<number>, see "Releasing the analysis tools" in the
-# README.
+# the GitHub release tools-<number>, see "Releasing the analysis tools" in
+# CONTRIBUTING.md.
 #
 # The tools are versioned separately from the plugin since they rarely change.
 # Release numbers are plain integers: Picard treats tags that look like version
@@ -15,8 +18,10 @@ on:
   pull_request:
     paths:
       - extractors/**
+      - models/*.onnx
       - scripts/build-binaries.*
       - scripts/test-binaries.py
+      - scripts/reference-predictions.json
       - .github/workflows/tools.yml
   workflow_dispatch:
     inputs:
@@ -73,17 +78,19 @@ jobs:
           - platform: linux-x86_64
             runner: ubuntu-24.04
             container: quay.io/pypa/manylinux_2_28_x86_64
+            gpu: true
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
             container: quay.io/pypa/manylinux_2_28_aarch64
+            gpu: true
           - platform: macos-arm64
             runner: macos-15
           - platform: macos-x86_64
             runner: macos-15-intel
-          # Also runs on Windows on ARM through emulation, there is no
-          # TensorFlow for Windows on ARM
+          # Also runs on Windows on ARM through emulation
           - platform: windows-x86_64
             runner: windows-2022
+            gpu: true
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     timeout-minutes: 120
@@ -166,13 +173,15 @@ jobs:
             ForEach-Object { $_.Matches[0].Groups[1].Value } |
             Where-Object { $_ -notin $finished.Output }
 
+      # --gpu also checks the GPU code path, which falls back to the CPU on
+      # runners without a usable GPU
       - name: Test
         if: runner.os != 'Windows'
-        run: python3 scripts/test-binaries.py --require-ffmpeg "bin/${{ matrix.platform }}"
+        run: python3 scripts/test-binaries.py --require-ffmpeg --gpu "bin/${{ matrix.platform }}"
 
       - name: Test
         if: runner.os == 'Windows'
-        run: python scripts/test-binaries.py --require-ffmpeg "bin/${{ matrix.platform }}"
+        run: python scripts/test-binaries.py --require-ffmpeg --gpu "bin/${{ matrix.platform }}"
 
       - name: Package
         if: runner.os != 'Windows'
@@ -186,6 +195,34 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Compress-Archive -Path "bin\${{ matrix.platform }}" -DestinationPath "dist\$env:ARCHIVE.zip"
+
+      # The same tools plus the WebGPU execution provider. Everything else is
+      # already built, this only installs them again
+      - name: Build GPU tools
+        if: matrix.gpu && runner.os != 'Windows'
+        run: scripts/build-binaries.sh --webgpu --output "bin-gpu/${{ matrix.platform }}"
+
+      - name: Build GPU tools
+        if: matrix.gpu && runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-binaries.ps1 -FFmpeg build/prefix-windows-x86_64 -WebGPU -Output "bin-gpu\${{ matrix.platform }}"
+
+      - name: Test GPU tools
+        if: matrix.gpu && runner.os != 'Windows'
+        run: python3 scripts/test-binaries.py --require-ffmpeg --gpu "bin-gpu/${{ matrix.platform }}"
+
+      - name: Test GPU tools
+        if: matrix.gpu && runner.os == 'Windows'
+        run: python scripts/test-binaries.py --require-ffmpeg --gpu "bin-gpu/${{ matrix.platform }}"
+
+      - name: Package GPU tools
+        if: matrix.gpu && runner.os != 'Windows'
+        run: XZ_OPT=-T0 tar -C bin-gpu -cJf "dist/$ARCHIVE-gpu.tar.xz" "${{ matrix.platform }}"
+
+      - name: Package GPU tools
+        if: matrix.gpu && runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "bin-gpu\${{ matrix.platform }}" -DestinationPath "dist\$env:ARCHIVE-gpu.zip"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -228,7 +265,9 @@ jobs:
           cat > notes.md <<EOF
           Analysis tools release $RELEASE, built from $GITHUB_SHA.
 
-          Extract the archive for your platform into the plugin's \`bin/\` directory, e.g.
+          The \`-gpu\` archives also include the WebGPU execution provider, which runs the MusicNN models on the GPU (Vulkan on Linux, Direct3D 12 on Windows). On macOS the regular archives use the GPU through CoreML.
+
+          The easiest way to install them is the "Install tools" button in the plugin options. To install them manually, extract the archive for your platform into the plugin's \`bin/\` directory, e.g.
 
           \`\`\`sh
           tar -xJf abng-tools-$RELEASE-linux-x86_64.tar.xz -C ~/.local/share/MusicBrainz/Picard/plugins3/acousticbrainz_ng_*/bin
@@ -236,7 +275,7 @@ jobs:
 
           \`picard-cli plugins info AcousticBrainz-ng\` shows where the plugin is installed. Check the downloads with \`sha256sum -c SHA256SUMS\` or \`gh attestation verify <file> -R $GH_REPO\`.
 
-          The Linux builds need glibc 2.28 or newer, the macOS builds macOS 12 or newer. The Windows build also runs on Windows on ARM.
+          The Linux builds need glibc 2.28 or newer, the macOS builds macOS 14 or newer on Apple Silicon and 13.4 or newer on Intel Macs. The Windows builds also run on Windows on ARM.
           EOF
           gh release create "tools-$RELEASE" dist/* \
             --target "$GITHUB_SHA" \
