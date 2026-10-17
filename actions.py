@@ -1,4 +1,5 @@
 import os
+import threading
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Dict, List, Optional
@@ -30,6 +31,8 @@ class WorkItem:
     album: Optional[Album] = None
     # Whether to measure the album loudness or only reuse a cached one
     measure_album: bool = False
+    # Whether the analysis of the files has begun, see AnalysisBatch
+    started: bool = False
 
 
 def _real_album(album: Any) -> Optional[Album]:
@@ -141,9 +144,31 @@ def _update_containers(item: WorkItem, update_album: bool = True) -> None:
 
 
 class AnalysisBatch:
-    def __init__(self, num_items: int):
-        self.num_items = num_items
+    def __init__(self, items: List[WorkItem]):
+        self.items = items
+        self.num_items = len(items)
         self.current = 0
+        self.remaining = len(items)
+        self.stopped = False
+        # Guards stopped and the started flag of the items, which are set from
+        # different threads
+        self._lock = threading.Lock()
+
+    def should_continue(self, item: WorkItem) -> bool:
+        """Called on a worker thread before analyzing each file of the item,
+        returns False once the batch was stopped"""
+        with self._lock:
+            if self.stopped:
+                return False
+            item.started = True
+            return True
+
+    def stop(self) -> List[WorkItem]:
+        """Stops analyzing files which haven't started yet, those being
+        analyzed are finished. Returns the items which haven't started"""
+        with self._lock:
+            self.stopped = True
+            return [item for item in self.items if not item.started]
 
     def format_progress(self) -> str:
         if self.num_items <= 1:
@@ -172,7 +197,9 @@ class AcousticBrainzNGAction(BaseAction):
 
         settings = plugin.settings()
         plugin.pool.setMaxThreadCount(settings.max_concurrent_analyses)
-        batch = AnalysisBatch(len(items))
+        batch = AnalysisBatch(items)
+        plugin.batches.add(batch)
+        plugin.update_analysis_running()
         album_jobs: Dict[tuple, AlbumJob] = {}
 
         if batch.num_items == 1:
@@ -192,13 +219,27 @@ class AcousticBrainzNGAction(BaseAction):
 
             plugin.in_flight.update(file.filename for file in item.files)
             thread.run_task(
-                partial(plugin.analyze_track, settings, [file_job(file) for file in item.files], job_for_album),
+                partial(plugin.analyze_track, settings, [file_job(file) for file in item.files], job_for_album, partial(batch.should_continue, item)),
                 partial(_analysis_callback, plugin, batch, item),
                 thread_pool=plugin.pool,
             )
 
 
 def _analysis_callback(plugin: AcousticBrainzNG, batch: AnalysisBatch, item: WorkItem, result: Optional[TrackResult] = None, error=None):
+    batch.remaining -= 1
+    if batch.remaining == 0:
+        plugin.batches.discard(batch)
+        plugin.update_analysis_running()
+
+    # The files of items skipped by a stop were already released when stopping
+    if not (batch.stopped and not item.started):
+        _apply_analysis(plugin, batch, item, result, error)
+
+    if batch.stopped and batch.remaining == 0:
+        _set_statusbar_message(plugin.api, 'Stopped analysis with %s.', PLUGIN_NAME)
+
+
+def _apply_analysis(plugin: AcousticBrainzNG, batch: AnalysisBatch, item: WorkItem, result: Optional[TrackResult], error) -> None:
     for file in item.files:
         plugin.in_flight.discard(file.filename)
 
@@ -231,6 +272,42 @@ def _analysis_callback(plugin: AcousticBrainzNG, batch: AnalysisBatch, item: Wor
         error_msg = str(error) if error else "Unknown error"
         api.logger.error(f"Analysis failed for {name}: {error_msg}")
         _set_statusbar_message(api, 'Failed to analyze "%s"%s.', name, progress)
+
+
+class AcousticBrainzNGStopAction(BaseAction):
+    TITLE = "Stop analysis"
+    MENU = (PLUGIN_NAME,)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Picard creates a new instance whenever it rebuilds the menu, Qt
+        # disconnects the old ones when they are deleted
+        plugin = get_instance()
+        self.setEnabled(plugin is not None and plugin.is_analyzing())
+        if plugin is not None:
+            plugin.signals.analysis_running.connect(self.setEnabled)
+
+    def callback(self, objs):
+        plugin = get_instance()
+        if plugin is None:
+            return
+
+        batches = [batch for batch in plugin.batches if not batch.stopped]
+        if not batches:
+            return
+
+        skipped = 0
+        for batch in batches:
+            for item in batch.stop():
+                skipped += 1
+                # Released right away so that they can be queued again while
+                # the current files finish
+                for file in item.files:
+                    plugin.in_flight.discard(file.filename)
+        plugin.update_analysis_running()
+
+        self.api.logger.debug(f"Stopping {PLUGIN_NAME} analysis, skipping {skipped} queued tracks")
+        _set_statusbar_message(self.api, 'Stopping analysis with %s after the current tracks...', PLUGIN_NAME)
 
 
 class AcousticBrainzNGDeleteCacheAction(BaseAction):

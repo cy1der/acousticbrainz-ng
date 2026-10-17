@@ -5,6 +5,7 @@ from picard.plugin3.api import PluginApi
 from .actions import (
     AcousticBrainzNGAction,
     AcousticBrainzNGDeleteCacheAction,
+    AcousticBrainzNGStopAction,
     apply_cached_results,
 )
 from .analyzer import AcousticBrainzNG, get_instance, set_instance
@@ -52,6 +53,7 @@ def enable(api: PluginApi) -> None:
         api.register_track_action(action)
         api.register_cluster_action(action)
         api.register_file_action(action)
+    api.register_tools_menu_action(AcousticBrainzNGStopAction)
     api.register_file_post_addition_to_track_processor(apply_cached_results)
 
 

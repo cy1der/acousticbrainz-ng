@@ -26,6 +26,8 @@ Installed from a release tag, Picard only updates the plugin to newer releases. 
 
 Select albums, tracks, clusters or files and use **Plugins → AcousticBrainz-ng → Analyze** from the context menu. Results are cached, analyzing the same files again or matching them to tracks later applies the cached results without analyzing them again. Analyzing a single track reuses the album's ReplayGain if the whole album has been analyzed before.
 
+To cancel a running analysis, use **Plugin Tools → AcousticBrainz-ng → Stop analysis** from the menu bar. Files already being analyzed are finished and saved to the cache, the rest of the queue is skipped.
+
 Analysis results are cached in Picard's cache directory by default, this can be changed in the plugin options page.
 
 Settings from the Picard 2 version of the plugin are migrated automatically, except for the binaries, models and cache paths.
