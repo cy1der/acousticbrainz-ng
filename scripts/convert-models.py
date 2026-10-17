@@ -65,6 +65,23 @@ def download(url: str, path: str, checksum: str) -> None:
         raise SystemExit(f"Checksum mismatch for {url} (expected {checksum}, got {actual}), removed the file")
 
 
+def add_default_pads(model) -> None:
+    """Gives the pooling and convolution nodes without padding an explicit
+    pads attribute. Without it, ONNX Runtime's CoreML execution provider leaves
+    out the pad parameter, which CoreML requires"""
+    import onnx
+
+    for node in model.graph.node:
+        if node.op_type not in ("Conv", "MaxPool", "AveragePool"):
+            continue
+        attributes = {attribute.name: attribute for attribute in node.attribute}
+        auto_pad = attributes.get("auto_pad")
+        if "pads" in attributes or (auto_pad is not None and auto_pad.s not in (b"", b"NOTSET")):
+            continue
+        kernel_shape = onnx.helper.get_attribute_value(attributes["kernel_shape"])
+        node.attribute.append(onnx.helper.make_attribute("pads", [0] * (2 * len(kernel_shape))))
+
+
 def main() -> None:
     arguments = sys.argv[1:]
     keep = None
@@ -76,6 +93,7 @@ def main() -> None:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     import numpy as np
+    import onnx
     import onnxruntime
     import tensorflow as tf
     import tf2onnx
@@ -95,8 +113,9 @@ def main() -> None:
                 graph_def.ParseFromString(f.read())
 
             output = os.path.join(REPOSITORY, "models", name + ".onnx")
-            tf2onnx.convert.from_graph_def(graph_def, input_names=[INPUT], output_names=[OUTPUT],
-                                           opset=OPSET, output_path=output)
+            model, _ = tf2onnx.convert.from_graph_def(graph_def, input_names=[INPUT], output_names=[OUTPUT], opset=OPSET)
+            add_default_pads(model)
+            onnx.save(model, output)
 
             graph = tf.Graph()
             with graph.as_default():
