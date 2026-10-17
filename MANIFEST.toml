@@ -13,7 +13,7 @@ External dependencies:
 - A few MusicNN models (included)
 - [FFmpeg](https://ffmpeg.org) (included with the analysis tools)
 
-**This plugin is CPU heavy!** It can run the MusicNN models on the GPU instead.
+**This plugin is compute heavy!**
 """
 version = "3.3.1"
 api = ["3.0"]
