@@ -50,7 +50,7 @@ The models in `models/` are Essentia's MusicNN models converted to ONNX. [`scrip
 
 The tools are versioned separately from the plugin since they rarely change. Publish a new tools release when `extractors/`, `models/` or the dependencies in the build scripts change:
 
-1. Run the **Analysis tools** workflow from the Actions tab with the next release number, e.g. `4`. It builds and tests the tools on every platform, the GPU tools for Linux and Windows, then publishes the `tools-4` release with checksums and build provenance. Release numbers are plain integers, Picard would mistake tags like `tools-v4.0.0` for plugin versions.
+1. Run the **Analysis tools** workflow from the Actions tab with the next release number, e.g. `5`. It builds and tests the tools on every platform, the GPU tools for Linux and Windows, then publishes the `tools-5` release with checksums and build provenance. Release numbers are plain integers, Picard would mistake tags like `tools-v5.0.0` for plugin versions.
 2. Update the release number in the README and in `TOOLS_RELEASE` in `constants.py`, and copy the checksums from the release's `SHA256SUMS` to `TOOLS_CHECKSUMS` in `constants.py`: the archives ending in `-gpu` go to `"gpu"`, the others to `"cpu"`. The install button only accepts archives matching these checksums.
 
 Pull requests that change the tools run the same builds without publishing anything.

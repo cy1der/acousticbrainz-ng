@@ -35,7 +35,7 @@ Most of the analysis time is spent in the MusicNN models. For a 4-minute track t
 
 The analysis tools need Linux with glibc 2.28 or newer, macOS 14 or newer on Apple Silicon and 13.4 or newer on Intel Macs, or 64-bit Windows 10 or newer.
 
-What has been tested with the current analysis tools (`tools-3`). ✅ works, ❌ broken, ❔ not tested yet. Please [open an issue](https://github.com/cy1der/acousticbrainz-ng/issues) with your results, especially for the ❔ rows.
+What has been tested with the current analysis tools (`tools-4`). ✅ works, ❌ broken, ❔ not tested yet. Please [open an issue](https://github.com/cy1der/acousticbrainz-ng/issues) with your results, especially for the ❔ rows.
 
 | OS | Arch | Backend | GPU | Status | Notes |
 |---------|-----------------------|--------|---------------------------|----|-------|
@@ -60,7 +60,7 @@ To test, analyze a few tracks, then click **Check** next to the binaries path, w
 
 ## Analysis tools
 
-The plugin runs a few small programs built on Essentia and [ONNX Runtime](https://onnxruntime.ai) (sources in [`extractors/`](./extractors)), and FFmpeg, which is included with them. **Install tools** downloads them from the [`tools-3` release](https://github.com/cy1der/acousticbrainz-ng/releases/tag/tools-3), checks them against the checksums pinned in the plugin and puts them in `bin/<platform>/` in the plugin directory (`picard-cli plugins info AcousticBrainz-ng` shows where that is). It uses Picard's proxy settings, only HTTP proxies are supported.
+The plugin runs a few small programs built on Essentia and [ONNX Runtime](https://onnxruntime.ai) (sources in [`extractors/`](./extractors)), and FFmpeg, which is included with them. **Install tools** downloads them from the [`tools-4` release](https://github.com/cy1der/acousticbrainz-ng/releases/tag/tools-4), checks them against the checksums pinned in the plugin and puts them in `bin/<platform>/` in the plugin directory (`picard-cli plugins info AcousticBrainz-ng` shows where that is). It uses Picard's proxy settings, only HTTP proxies are supported.
 
 To install them manually, extract the archive for your platform from the release into the plugin's `bin/` directory. The `-gpu` archives include GPU support for Linux and Windows.
 
